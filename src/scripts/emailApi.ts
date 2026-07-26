@@ -7,6 +7,10 @@ const uid = (p = 'm'): string =>
  * Extracts real live emails from Google Gmail API
  * Endpoint: https://gmail.googleapis.com/gmail/v1/users/me/messages
  */
+/**
+ * Extracts real live emails from Google Gmail API
+ * Endpoint: https://gmail.googleapis.com/gmail/v1/users/me/messages
+ */
 export async function fetchRealGmailMails(accessToken: string, accountEmail: string): Promise<Mail[]> {
   try {
     const listRes = await fetch(
@@ -29,8 +33,8 @@ export async function fetchRealGmailMails(accessToken: string, accountEmail: str
 
     const fetchedMails: Mail[] = [];
 
-    // Fetch detail for top 15 messages
-    for (const item of messageSummaries.slice(0, 15)) {
+    // Fetch detail for top 20 messages
+    for (const item of messageSummaries.slice(0, 20)) {
       try {
         const detailRes = await fetch(
           `https://gmail.googleapis.com/gmail/v1/users/me/messages/${item.id}?format=full`,
@@ -47,7 +51,7 @@ export async function fetchRealGmailMails(accessToken: string, accountEmail: str
         const fromHeader = headers.find((h) => h.name.toLowerCase() === 'from');
         const dateHeader = headers.find((h) => h.name.toLowerCase() === 'date');
 
-        const rawFrom = fromHeader?.value || 'Google User';
+        const rawFrom = fromHeader?.value || 'Remitente';
         const subject = subjectHeader?.value || '(Sin asunto)';
         const snippet = msg.snippet || '';
 
@@ -67,13 +71,22 @@ export async function fetchRealGmailMails(accessToken: string, accountEmail: str
         const isUnread = Boolean(msg.labelIds?.includes('UNREAD'));
         const isStarred = Boolean(msg.labelIds?.includes('STARRED'));
 
+        let bodyContent = snippet;
+        if (msg.payload?.body?.data) {
+          try {
+            bodyContent = atob(msg.payload.body.data.replace(/-/g, '+').replace(/_/g, '/'));
+          } catch {
+            bodyContent = snippet;
+          }
+        }
+
         fetchedMails.push({
-          id: uid('m'),
+          id: item.id || uid('m'),
           from: senderName,
           fromEmail: senderEmail,
           to: accountEmail,
           subject: subject,
-          body: snippet,
+          body: bodyContent || snippet || '(Sin contenido)',
           account: accountEmail,
           time: timeLabel,
           unread: isUnread,

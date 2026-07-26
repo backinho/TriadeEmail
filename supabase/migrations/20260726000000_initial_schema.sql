@@ -26,14 +26,24 @@ COMMENT ON TABLE public.profiles IS 'Perfil del usuario y sus preferencias de ap
 -- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.user_accounts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
     email TEXT NOT NULL,
+    access_token TEXT,
+    refresh_token TEXT,
+    expires_at BIGINT,
     is_primary BOOLEAN DEFAULT FALSE NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
     UNIQUE(user_id, email)
 );
 
-COMMENT ON TABLE public.user_accounts IS 'Cuentas de correo vinculadas al usuario centralizado';
+COMMENT ON TABLE public.user_accounts IS 'Cuentas de correo vinculadas al usuario con tokens OAuth de Google / Microsoft';
+COMMENT ON COLUMN public.user_accounts.id IS 'Primary Key UUID';
+COMMENT ON COLUMN public.user_accounts.user_id IS 'Foreign Key -> auth.users(id)';
+COMMENT ON COLUMN public.user_accounts.email IS 'El correo de Gmail/Outlook conectado';
+COMMENT ON COLUMN public.user_accounts.access_token IS 'Token de acceso de Google / Microsoft';
+COMMENT ON COLUMN public.user_accounts.refresh_token IS 'Fundamental para no perder el acceso';
+COMMENT ON COLUMN public.user_accounts.expires_at IS 'Cuándo vence el access token (timestamp Unix bigint)';
 
 -- ---------------------------------------------------------------------
 -- 3. TABLA DE CATEGORÍAS (categories)

@@ -3,11 +3,16 @@ export type Theme = 'dark' | 'light';
 export type EmailProvider = 'gmail' | 'outlook' | 'custom';
 
 export interface Account {
+  id?: string;
+  user_id?: string;
   email: string;
   primary: boolean;
   provider?: EmailProvider;
   status?: 'connected' | 'syncing';
   lastSync?: string;
+  access_token?: string;
+  refresh_token?: string;
+  expires_at?: number;
   token?: string;
 }
 
