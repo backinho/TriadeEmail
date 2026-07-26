@@ -20,6 +20,9 @@ import BaseLayout from '../layouts/BaseLayout.astro';
       <input id="searchInput" data-i18n-placeholder="search_placeholder" placeholder="Buscar…" />
     </div>
     <div class="actions">
+      <button class="btn icon ghost" id="syncInboxBtn" data-i18n-title="sync_inbox" title="Sincronizar bandeja">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6"/><path d="M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+      </button>
       <button class="btn icon ghost" id="openSettings" data-i18n-title="settings" title="Ajustes">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
       </button>
@@ -255,10 +258,15 @@ import BaseLayout from '../layouts/BaseLayout.astro';
       <section class="settings-section active" data-section="parameters">
         <h3 data-i18n="manage_accounts">Cuentas de correo</h3>
         <p class="hint" data-i18n="manage_accounts_hint">Añade y gestiona los correos que centralizarás en Triade.</p>
-        <div id="accountsEdit" class="accounts-list"></div>
-        <div class="row-inline">
-          <input class="input" id="newAccountEmail" placeholder="nuevo@correo.com" />
-          <button class="btn primary" id="addAccountBtn" data-i18n="add_account">Añadir correo</button>
+        <div id="accountsEdit" class="accounts-list" style="margin-bottom:1rem"></div>
+        <div class="row-inline flex-wrap" style="gap:0.5rem">
+          <select id="newAccountProvider" class="input" style="max-width:130px">
+            <option value="gmail">Gmail</option>
+            <option value="outlook">Outlook</option>
+            <option value="custom">Otro</option>
+          </select>
+          <input class="input" id="newAccountEmail" placeholder="correo@gmail.com / outlook.com" style="flex:1;min-width:180px" />
+          <button class="btn primary" id="addAccountBtn" data-i18n="connect_sync">Conectar y Sincronizar</button>
         </div>
 
         <h3 style="margin-top:1.4rem" data-i18n="keywords_title">Categorías y palabras clave</h3>
@@ -327,6 +335,55 @@ import BaseLayout from '../layouts/BaseLayout.astro';
           <div class="lang-btn" data-lang="en" data-i18n="english">Inglés</div>
         </div>
       </section>
+    </div>
+  </div>
+</div>
+
+<!-- CONNECT PROVIDER ONBOARDING MODAL -->
+<div class="modal-backdrop" id="connectProviderModal">
+  <div class="connect-modal glass glass-strong">
+    <div class="modal-header">
+      <h2 data-i18n="connect_provider_title">Registra tu correo en vivo</h2>
+      <button class="btn icon ghost" id="closeConnectModal" title="Cerrar">✕</button>
+    </div>
+    <p class="hint" data-i18n="connect_provider_desc" style="margin-bottom: 1.25rem; font-size: 0.88rem; color: var(--fg-mute); line-height: 1.5;">
+      Conecta directamente con la API de Gmail o Microsoft Graph para extraer tus correos recibidos reales.
+    </p>
+
+    <div class="oauth-buttons" style="display:flex; flex-direction:column; gap:0.65rem; margin-bottom:0.5rem;">
+      <button class="oauth-btn google" id="googleOAuthBtn">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12.545,10.239v3.821h5.445c-0.712,2.315-2.647,3.972-5.445,3.972c-3.332,0-6.033-2.701-6.033-6.032s2.701-6.032,6.033-6.032c1.498,0,2.866,0.549,3.921,1.453l2.814-2.814C17.503,2.988,15.139,2,12.545,2C7.021,2,2.543,6.477,2.543,12s4.478,10,10.002,10c8.396,0,10.249-7.85,9.426-11.761H12.545z"/></svg>
+        Conectar con Google OAuth (Gmail)
+      </button>
+      <button class="oauth-btn microsoft" id="microsoftOAuthBtn">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M11.4 24H0V12.6h11.4V24zM24 24H12.6V12.6H24V24zM11.4 11.4H0V0h11.4v11.4zM24 11.4H12.6V0H24v11.4z"/></svg>
+        Conectar con Microsoft OAuth (Outlook)
+      </button>
+    </div>
+
+    <div class="modal-divider">
+      <span>o ingresa tu correo y Token API</span>
+    </div>
+
+    <div class="form-field">
+      <label data-i18n="select_provider">Proveedor</label>
+      <select id="modalAccountProvider" class="input">
+        <option value="gmail">Gmail (Google API REST)</option>
+        <option value="outlook">Outlook (Microsoft Graph API)</option>
+        <option value="custom">Otro correo</option>
+      </select>
+    </div>
+    <div class="form-field">
+      <label data-i18n="email">Correo electrónico real</label>
+      <input class="input" id="modalAccountEmail" placeholder="ejemplo@gmail.com / outlook.com" />
+    </div>
+    <div class="form-field">
+      <label>Token de Acceso OAuth / API Key (opcional)</label>
+      <input class="input" id="modalAccountToken" type="password" placeholder="Token Bearer de Gmail o Graph API..." />
+    </div>
+    <div class="row-inline" style="justify-content: flex-end; gap: 0.6rem; margin-top: 1.25rem;">
+      <button class="btn ghost" id="skipConnectModal" data-i18n="cancel">Omitir</button>
+      <button class="btn primary" id="confirmConnectModal" data-i18n="connect_sync">Conectar y Extraer Mails</button>
     </div>
   </div>
 </div>

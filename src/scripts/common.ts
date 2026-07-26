@@ -1,9 +1,14 @@
 export type Lang = 'es' | 'en';
 export type Theme = 'dark' | 'light';
+export type EmailProvider = 'gmail' | 'outlook' | 'custom';
 
 export interface Account {
   email: string;
   primary: boolean;
+  provider?: EmailProvider;
+  status?: 'connected' | 'syncing';
+  lastSync?: string;
+  token?: string;
 }
 
 export interface Category {
@@ -193,6 +198,17 @@ export const I18N: Record<Lang, Record<string, string>> = {
     link_text: 'Texto a mostrar',
     cancel: 'Cancelar',
     insert: 'Insertar',
+    sync_inbox: 'Sincronizar bandeja',
+    syncing: 'Sincronizando...',
+    synced_success: 'Bandeja sincronizada correctamente',
+    connect_provider_title: 'Registra tu cuenta de correo',
+    connect_provider_desc: 'Conecta tu correo de Gmail u Outlook para obtener todos tus mensajes en la bandeja centralizada.',
+    select_provider: 'Proveedor',
+    connect_sync: 'Conectar y Sincronizar',
+    gmail: 'Gmail',
+    outlook: 'Outlook',
+    custom_provider: 'Otro / Personalizado',
+    last_synced: 'Última sincr.:',
   },
   en: {
     welcome_back: 'Welcome back',
@@ -309,6 +325,17 @@ export const I18N: Record<Lang, Record<string, string>> = {
     link_text: 'Display text',
     cancel: 'Cancel',
     insert: 'Insert',
+    sync_inbox: 'Sync inbox',
+    syncing: 'Syncing...',
+    synced_success: 'Inbox synchronized successfully',
+    connect_provider_title: 'Register your email account',
+    connect_provider_desc: 'Connect your Gmail or Outlook email to fetch all your messages into the centralized inbox.',
+    select_provider: 'Provider',
+    connect_sync: 'Connect & Sync',
+    gmail: 'Gmail',
+    outlook: 'Outlook',
+    custom_provider: 'Other / Custom',
+    last_synced: 'Last synced:',
   },
 };
 

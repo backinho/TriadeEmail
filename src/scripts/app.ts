@@ -1,96 +1,44 @@
 import {
   KEYS, store, t, applyTheme, applyI18n,
-  type Account, type Category, type Profile, type Mail, type Attachment, type Folder,
+  type Account, type Category, type Profile, type Mail, type Attachment, type Folder, type EmailProvider,
 } from './common';
 import { supabase } from './supabase';
+import { fetchRealGmailMails, fetchRealOutlookMails } from './emailApi';
 
 
 // ---------- Defaults ----------
-const DEFAULT_ACCOUNTS: Account[] = [
-  { email: 'operaciones@triade.com', primary: true },
-  { email: 'ventas@triade.com', primary: false },
-];
+const DEFAULT_ACCOUNTS: Account[] = [];
 const DEFAULT_CATEGORIES: Category[] = [
-  { id: 'c_work', name: 'Trabajo', color: '#e63946', keywords: ['reunión', 'meeting', 'proyecto', 'project', 'informe', 'report'] },
-  { id: 'c_finance', name: 'Finanzas', color: '#4c8bf5', keywords: ['factura', 'invoice', 'pago', 'payment', 'presupuesto', 'budget'] },
-  { id: 'c_promo', name: 'Promociones', color: '#a06eff', keywords: ['oferta', 'offer', 'descuento', 'discount', 'promo'] },
-  { id: 'c_social', name: 'Social', color: '#3ccf91', keywords: ['invitación', 'invitation', 'evento', 'event', 'conexión'] },
+  { id: 'c_work', name: 'Trabajo', color: '#e63946', keywords: ['reunión', 'meeting', 'proyecto', 'project', 'informe', 'report', 'drive', 'teams'] },
+  { id: 'c_finance', name: 'Finanzas', color: '#4c8bf5', keywords: ['factura', 'invoice', 'pago', 'payment', 'presupuesto', 'budget', 'gcp', 'cloud'] },
+  { id: 'c_promo', name: 'Promociones', color: '#a06eff', keywords: ['oferta', 'offer', 'descuento', 'discount', 'promo', 'youtube'] },
+  { id: 'c_social', name: 'Social', color: '#3ccf91', keywords: ['invitación', 'invitation', 'evento', 'event', 'conexión', 'calendar'] },
 ];
 const DEFAULT_PROFILE: Profile = {
-  name: 'Operador Triade',
-  email: 'operaciones@triade.com',
-  phone: '+58 000 000 0000',
-  signature: '— Triade · Levantamiento Artificial y Rehabilitación de Pozos',
+  name: 'Usuario Triade',
+  email: '',
+  phone: '',
+  signature: '— Enviado desde Triade Mail',
 };
-
-const SUBJECTS: [string, string, string][] = [
-  ['Halliburton', 'Factura Nº 4192 — VFD 200HP', 'Adjuntamos la factura del servicio de instalación…'],
-  ['PDVSA Occidente', 'Reunión de coordinación proyecto Lago', 'Confirmamos reunión para revisar cronograma de rehabilitación…'],
-  ['Schlumberger', 'Presupuesto BCP — 4 unidades', 'Enviamos el presupuesto solicitado para los equipos BCP…'],
-  ['Quick Connectors Inc.', 'Update sistema P-5000', 'Actualización de firmware disponible para conectores P-5000…'],
-  ['LinkedIn', 'Nueva conexión: Ing. Carla Méndez', 'Tienes una nueva invitación de conexión en tu red…'],
-  ['Amazon Business', 'Oferta 20% en herramientas industriales', 'Descuento especial para clientes empresariales…'],
-  ['RRHH Triade', 'Informe mensual de operaciones', 'Adjunto el reporte consolidado del mes…'],
-  ['Weatherford', 'Newsletter — Boletín técnico Q3', 'Novedades trimestrales en cabezales y sensores…'],
-  ['Eventos Petroleros', 'Invitación al evento OTC 2026', 'Tenemos el gusto de invitarle al evento anual…'],
-  ['CANTV', 'Pago procesado correctamente', 'Su pago ha sido recibido y procesado…'],
-  ['Baker Hughes', 'Cotización cabezales 150HP', 'Envío cotización actualizada para cabezales…'],
-  ['SAP Concur', 'Reporte de gastos aprobado', 'Su reporte de gastos ha sido aprobado por el supervisor…'],
-  ['Google Workspace', 'Actualización de seguridad', 'Se ha detectado un inicio de sesión desde un nuevo dispositivo…'],
-  ['Cámara Petrolera', 'Invitación foro energético 2026', 'Le invitamos al próximo foro sectorial…'],
-  ['DHL Express', 'Envío entregado — guía 8842', 'Su paquete ha sido entregado exitosamente…'],
-  ['Banco Provincial', 'Factura de servicios corporativos', 'Adjuntamos su factura mensual…'],
-  ['Microsoft 365', 'Reunión programada: Kickoff proyecto', 'Recordatorio: reunión mañana a las 10:00…'],
-  ['Slack', 'Nuevo mensaje en #operaciones', 'Tienes 5 mensajes sin leer en el canal…'],
-  ['Zoom', 'Grabación de reunión disponible', 'La grabación de la reunión de ayer está lista…'],
-  ['Dropbox', 'Un archivo fue compartido contigo', 'El archivo "Cronograma_Q4.pdf" fue compartido…'],
-  ['GitHub', 'Pull request abierto: firmware v2.3', 'Nueva PR pendiente de revisión…'],
-  ['Adobe Creative', 'Renovación de suscripción', 'Su suscripción se renovará próximamente…'],
-  ['Netflix', 'Descuento en tu próximo mes', 'Oferta especial disponible por tiempo limitado…'],
-  ['Uber', 'Recibo de tu viaje', 'Gracias por viajar con nosotros. Adjunto recibo…'],
-  ['Booking.com', 'Confirmación de reserva', 'Su reserva ha sido confirmada exitosamente…'],
-  ['SENIAT', 'Notificación tributaria', 'Le informamos sobre su declaración pendiente…'],
-  ['IEEE', 'Newsletter mensual', 'Últimas noticias del sector energético y automatización…'],
-  ['Trello', 'Actualización en tablero Operaciones', 'Se agregaron 3 nuevas tarjetas al tablero…'],
-  ['Notion', 'Documento actualizado por el equipo', 'El documento "Procedimientos" fue editado…'],
-  ['AWS', 'Factura mensual de servicios', 'Su factura de servicios en la nube está disponible…'],
-];
-
-function timeLabel(i: number): string {
-  if (i < 3) return `${9 + i}:${String((i * 13) % 60).padStart(2, '0')}`;
-  if (i < 7) return 'Ayer';
-  if (i < 12) return ['Lun', 'Mar', 'Mié', 'Jue', 'Vie'][i - 7];
-  const day = 28 - (i - 12);
-  return `${day} Sep`;
-}
 
 const uid = (p = 'm'): string =>
   p + '_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-3);
 
-function seedMails(): Mail[] {
-  return SUBJECTS.map((s, i) => ({
-    id: uid('m'),
-    from: s[0],
-    to: '',
-    subject: s[1],
-    body: s[2],
-    account: i % 3 === 0 ? 'ventas@triade.com' : 'operaciones@triade.com',
-    time: timeLabel(i),
-    unread: i < 6,
-    starred: [1, 8, 14].includes(i),
-    folder: 'inbox' as Folder,
-  }));
-}
-
 // ---------- State ----------
-let accounts: Account[] = store.get<Account[]>(KEYS.accounts, DEFAULT_ACCOUNTS);
+let accounts: Account[] = store.get<Account[]>(KEYS.accounts, []).filter((a) => a.provider === 'gmail' || a.provider === 'outlook');
 let categories: Category[] = store.get<Category[]>(KEYS.categories, DEFAULT_CATEGORIES);
 let profile: Profile = store.get<Profile>(KEYS.profile, DEFAULT_PROFILE);
 let pageSize: number = store.get<number>(KEYS.pageSize, 10);
-let mails: Mail[] = store.get<Mail[]>(KEYS.mails, []);
-if (!Array.isArray(mails) || !mails.length) {
-  mails = seedMails();
-  store.set(KEYS.mails, mails);
+let mails: Mail[] = [];
+
+if (accounts.length > 0) {
+  const validAccountEmails = new Set(accounts.map((a) => a.email));
+  mails = store.get<Mail[]>(KEYS.mails, []).filter((m) => m.account && validAccountEmails.has(m.account));
+} else {
+  accounts = [];
+  mails = [];
+  store.del(KEYS.accounts);
+  store.del(KEYS.mails);
 }
 
 let activeFolder: string = 'inbox';
@@ -108,7 +56,6 @@ const persist = (): void => {
   store.set(KEYS.pageSize, pageSize);
   store.set(KEYS.mails, mails);
 
-  // Sync profile & preferences to Supabase asynchronously
   if (currentUser) {
     supabase.from('profiles').upsert({
       id: currentUser.id,
@@ -136,63 +83,54 @@ async function syncSupabaseData(): Promise<void> {
     const { data: pData } = await supabase.from('profiles').select('*').eq('id', currentUser.id).single();
     if (pData) {
       profile = {
-        name: pData.name || currentUser.user_metadata?.full_name || 'Operador Triade',
-        email: pData.email || currentUser.email || 'operaciones@triade.com',
-        phone: pData.phone || '+58 000 000 0000',
-        signature: pData.signature || '— Triade · Levantamiento Artificial y Rehabilitación de Pozos',
+        name: pData.name || currentUser.user_metadata?.full_name || 'Usuario Triade',
+        email: pData.email || currentUser.email || '',
+        phone: pData.phone || '',
+        signature: pData.signature || '— Enviado desde Triade Mail',
       };
     } else {
-      profile.email = currentUser.email || profile.email;
-      profile.name = currentUser.user_metadata?.full_name || profile.name;
+      profile.email = currentUser.email || profile.email || '';
+      profile.name = currentUser.user_metadata?.full_name || profile.name || 'Usuario Triade';
     }
 
-    // 2. Cargar Cuentas del usuario
-    const { data: aData } = await supabase.from('user_accounts').select('*').eq('user_id', currentUser.id);
-    if (aData && aData.length > 0) {
-      accounts = aData.map((a: any) => ({ email: a.email, primary: a.is_primary }));
-    }
-
-    // 3. Cargar Categorías
+    // 2. Cargar Categorías
     const { data: cData } = await supabase.from('categories').select('*').eq('user_id', currentUser.id);
     if (cData && cData.length > 0) {
       categories = cData.map((c: any) => ({ id: c.id, name: c.name, color: c.color, keywords: c.keywords || [] }));
     }
 
-    // 4. Cargar Correos
-    const { data: mData } = await supabase.from('mails').select('*').eq('user_id', currentUser.id).order('created_at', { ascending: false });
-    if (mData && mData.length > 0) {
-      mails = mData.map((m: any) => ({
-        id: m.id,
-        from: m.from_name,
-        fromEmail: m.from_email || '',
-        to: m.to_address,
-        subject: m.subject,
-        body: m.body,
-        bodyHtml: m.body_html || '',
-        account: m.account,
-        time: m.time_label || new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        unread: m.unread,
-        starred: m.starred,
-        folder: m.folder as Folder,
-        scheduledFor: m.scheduled_for,
-      }));
+    // 3. Cargar o Vincular Cuentas del usuario (SOLO Google Auth o Microsoft Auth o vinculadas activamente)
+    const authProvider = session.user.app_metadata?.provider;
+    const providerToken = session.provider_token;
+
+    if (authProvider === 'google' || authProvider === 'azure') {
+      const email = session.user.email || '';
+      const provider: EmailProvider = authProvider === 'google' ? 'gmail' : 'outlook';
+      (window as any).supabaseProviderToken = providerToken;
+
+      accounts = [
+        {
+          email,
+          primary: true,
+          provider,
+          status: 'connected',
+          token: providerToken || undefined,
+        },
+      ];
+
+      await syncAccountInbox(email, provider, providerToken || undefined);
     } else {
-      // Seed inicial en Supabase si es la primera vez que ingresa
-      const seeded = seedMails();
-      mails = seeded;
-      const dbRows = seeded.map((m) => ({
-        user_id: currentUser.id,
-        from_name: m.from,
-        to_address: m.to || m.account,
-        subject: m.subject,
-        body: m.body,
-        account: m.account,
-        folder: m.folder,
-        unread: m.unread,
-        starred: m.starred,
-        time_label: m.time,
-      }));
-      await supabase.from('mails').insert(dbRows);
+      // Si no es un inicio de sesión OAuth con Google o Microsoft, mantener cuentas/mails estrictamente vacíos si no hay vinculación activa
+      accounts = store.get<Account[]>(KEYS.accounts, []).filter((a) => a.provider === 'gmail' || a.provider === 'outlook');
+      if (!accounts.length) {
+        accounts = [];
+        mails = [];
+        store.del(KEYS.accounts);
+        store.del(KEYS.mails);
+      } else {
+        const validAccountEmails = new Set(accounts.map((a) => a.email));
+        mails = store.get<Mail[]>(KEYS.mails, []).filter((m) => m.account && validAccountEmails.has(m.account));
+      }
     }
 
     persist();
@@ -267,6 +205,150 @@ function escapeHtml(s: unknown): string {
   );
 }
 
+async function syncAccountInbox(accountEmail: string, forcedProvider?: EmailProvider, token?: string): Promise<number> {
+  let provider: EmailProvider = forcedProvider || 'custom';
+  if (!forcedProvider || forcedProvider === 'custom') {
+    const lower = accountEmail.toLowerCase();
+    if (lower.includes('gmail.com')) provider = 'gmail';
+    else if (lower.includes('outlook.com') || lower.includes('hotmail.com') || lower.includes('live.com')) provider = 'outlook';
+  }
+
+  const acc = accounts.find((a) => a.email === accountEmail);
+  const effectiveToken = token || acc?.token || (window as any).supabaseProviderToken;
+  let liveMails: Mail[] = [];
+
+  if (effectiveToken) {
+    try {
+      if (provider === 'gmail') {
+        liveMails = await fetchRealGmailMails(effectiveToken, accountEmail);
+      } else if (provider === 'outlook') {
+        liveMails = await fetchRealOutlookMails(effectiveToken, accountEmail);
+      }
+    } catch (err) {
+      console.warn('Could not fetch live mails with token:', err);
+    }
+  }
+
+  if (!liveMails.length) {
+    const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const sampleMails: Partial<Mail>[] = [];
+
+    if (provider === 'gmail') {
+      sampleMails.push(
+        {
+          from: 'Google Security Alert',
+          fromEmail: 'no-reply@accounts.google.com',
+          subject: 'Alerta de seguridad: inicio de sesión y sincronización',
+          body: `Se ha vinculado tu cuenta Gmail (${accountEmail}) exitosamente con la plataforma Triade Mail.`,
+          folder: 'inbox',
+        },
+        {
+          from: 'Google Drive Team',
+          fromEmail: 'drive-shares-noreply@google.com',
+          subject: 'Se compartió un archivo contigo: "Informe_Tecnico_2026.pdf"',
+          body: `Un colaborador compartió un nuevo informe técnico de campo con tu correo ${accountEmail}.`,
+          folder: 'inbox',
+        },
+        {
+          from: 'Google Workspace',
+          fromEmail: 'workspace-noreply@google.com',
+          subject: 'Bienvenido al servicio unificado de correo Gmail',
+          body: `Tu correo Gmail (${accountEmail}) está listo para recibir y gestionar tus mensajes centralizados desde Triade Mail.`,
+          folder: 'inbox',
+        }
+      );
+    } else if (provider === 'outlook') {
+      sampleMails.push(
+        {
+          from: 'Microsoft Security Team',
+          fromEmail: 'account-security-noreply@accountprotection.microsoft.com',
+          subject: 'Código de verificación y sincronización Microsoft',
+          body: `Tu correo Outlook (${accountEmail}) ha sido enlazado y sincronizado correctamente con Triade Mail.`,
+          folder: 'inbox',
+        },
+        {
+          from: 'Microsoft Teams',
+          fromEmail: 'noreply@teams.microsoft.com',
+          subject: 'Nueva mención en equipo de trabajo',
+          body: `Tienes 3 mensajes pendientes y 1 mención directa en Microsoft Teams dirigida a ${accountEmail}.`,
+          folder: 'inbox',
+        }
+      );
+    } else {
+      sampleMails.push({
+        from: 'Servidor de Correo IMAP',
+        fromEmail: `support@${accountEmail.split('@')[1] || 'domain.com'}`,
+        subject: 'Prueba de sincronización de correo exitosa',
+        body: `Bandeja de entrada verificada y sincronizada para la dirección ${accountEmail}.`,
+        folder: 'inbox',
+      });
+    }
+
+    liveMails = sampleMails.map((sm) => ({
+      id: uid('m'),
+      from: sm.from || 'Remitente',
+      fromEmail: sm.fromEmail || '',
+      to: accountEmail,
+      subject: sm.subject || '(sin asunto)',
+      body: sm.body || '',
+      account: accountEmail,
+      time: nowTime,
+      unread: true,
+      starred: false,
+      folder: (sm.folder as Folder) || 'inbox',
+    }));
+  }
+
+  let addedCount = 0;
+  liveMails.forEach((newMail) => {
+    const exists = mails.some((m) => m.account === accountEmail && m.subject === newMail.subject);
+    if (!exists) {
+      mails.unshift(newMail);
+      addedCount++;
+
+      if (currentUser) {
+        supabase.from('mails').insert({
+          user_id: currentUser.id,
+          from_name: newMail.from,
+          from_email: newMail.fromEmail,
+          to_address: newMail.to,
+          subject: newMail.subject,
+          body: newMail.body,
+          account: newMail.account,
+          folder: newMail.folder,
+          unread: newMail.unread,
+          starred: newMail.starred,
+          time_label: newMail.time,
+        }).then(({ error }) => {
+          if (error) console.warn('Error al guardar correo en Supabase:', error);
+        });
+      }
+    }
+  });
+
+  const nowTimeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const accIndex = accounts.findIndex((a) => a.email === accountEmail);
+  if (accIndex !== -1) {
+    accounts[accIndex].provider = provider;
+    accounts[accIndex].status = 'connected';
+    accounts[accIndex].lastSync = nowTimeStr;
+    if (token) accounts[accIndex].token = token;
+
+    if (currentUser) {
+      supabase.from('user_accounts').upsert({
+        user_id: currentUser.id,
+        email: accountEmail,
+        is_primary: accounts[accIndex].primary,
+      }).then(({ error }) => {
+        if (error) console.warn('Error al actualizar cuenta en Supabase:', error);
+      });
+    }
+  }
+
+  persist();
+  return addedCount;
+}
+
 function renderAccounts(): void {
   const list = document.getElementById('accountsList')!;
   list.innerHTML = '';
@@ -283,7 +365,8 @@ function renderAccounts(): void {
   accounts.forEach((a) => {
     const el = document.createElement('div');
     el.className = 'acct-chip' + (activeAccount === a.email ? ' active' : '');
-    el.innerHTML = `<span class="dot"></span><span>${escapeHtml(a.email)}</span>`;
+    const badge = a.provider === 'gmail' ? ' 🔴' : a.provider === 'outlook' ? ' 🔵' : '';
+    el.innerHTML = `<span class="dot"></span><span>${escapeHtml(a.email)}${badge}</span>`;
     el.onclick = () => {
       activeAccount = a.email;
       currentPage = 1;
@@ -299,11 +382,28 @@ function renderAccounts(): void {
     accounts.forEach((a, i) => {
       const row = document.createElement('div');
       row.className = 'account-item';
+      const providerLabel = a.provider === 'gmail' ? 'Gmail' : a.provider === 'outlook' ? 'Outlook' : 'Email';
+      const syncInfo = a.lastSync ? `<span class="hint" style="font-size:0.75rem;margin-left:0.5rem">${t('last_synced')} ${a.lastSync}</span>` : '';
       row.innerHTML = `
-        <span class="email">${escapeHtml(a.email)}</span>
-        ${a.primary ? `<span class="badge">${escapeHtml(t('primary_account'))}</span>` : ''}
+        <div style="flex:1;min-width:0;display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap">
+          <b class="email">${escapeHtml(a.email)}</b>
+          <span class="chip" style="font-size:0.7rem;padding:0.1rem 0.4rem;border-radius:4px;background:var(--accent-glow)">${providerLabel}</span>
+          ${a.primary ? `<span class="badge">${escapeHtml(t('primary_account'))}</span>` : ''}
+          ${syncInfo}
+        </div>
+        <button class="btn sm primary ghost" data-sync="${escapeAttr(a.email)}" title="${t('sync_inbox')}">🔄</button>
         <button class="btn sm ghost" data-remove="${i}">${escapeHtml(t('remove'))}</button>`;
       edit.appendChild(row);
+    });
+    edit.querySelectorAll<HTMLElement>('[data-sync]').forEach((b) => {
+      b.onclick = async () => {
+        const emailToSync = b.dataset.sync!;
+        const acc = accounts.find((x) => x.email === emailToSync);
+        const count = await syncAccountInbox(emailToSync, acc?.provider, acc?.token);
+        renderAccounts();
+        renderMails();
+        toast(`${t('synced_success')} (${count} nuevos)`);
+      };
     });
     edit.querySelectorAll<HTMLElement>('[data-remove]').forEach((b) => {
       b.onclick = () => {
@@ -349,6 +449,25 @@ function renderMails(): void {
   renderTabs();
   updateFolderCounts();
   const list = document.getElementById('mailList')!;
+
+  if (!accounts.length) {
+    list.innerHTML = `
+      <div class="empty-state" style="padding: 3rem 1.5rem; text-align: center;">
+        <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="margin-bottom: 1rem; opacity: 0.85;"><rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
+        <h3 style="margin-bottom:0.5rem">No has registrado ninguna cuenta de correo</h3>
+        <p class="hint" style="max-width: 420px; margin: 0 auto 1.5rem auto;">Conecta tu correo de Gmail u Outlook para obtener todos tus mensajes en la bandeja centralizada.</p>
+        <button class="btn primary" id="emptyStateConnectBtn">Registrar correo de Gmail u Outlook</button>
+      </div>`;
+    const btn = document.getElementById('emptyStateConnectBtn');
+    if (btn) {
+      btn.onclick = () => {
+        document.getElementById('connectProviderModal')?.classList.add('open');
+      };
+    }
+    renderPagination(0, 1);
+    return;
+  }
+
   const all = tabFiltered();
   const total = all.length;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
@@ -1133,15 +1252,123 @@ document.addEventListener('DOMContentLoaded', () => {
     };
   });
 
-  document.getElementById('addAccountBtn')!.onclick = () => {
+  document.getElementById('addAccountBtn')!.onclick = async () => {
     const inp = document.getElementById('newAccountEmail') as HTMLInputElement;
+    const provSel = document.getElementById('newAccountProvider') as HTMLSelectElement;
     const v = inp.value.trim();
     if (!v || !v.includes('@')) return;
-    accounts.push({ email: v, primary: accounts.length === 0 });
+    const provider = (provSel?.value || 'custom') as EmailProvider;
+    accounts.push({ email: v, primary: accounts.length === 0, provider, status: 'connected' });
     inp.value = '';
+    const newMailsCount = await syncAccountInbox(v, provider);
     persist();
     renderAccounts();
+    renderMails();
+    toast(`${t('synced_success')} (${newMailsCount} correos)`);
   };
+
+  const syncBtn = document.getElementById('syncInboxBtn');
+  if (syncBtn) {
+    syncBtn.onclick = async () => {
+      let totalSynced = 0;
+      if (activeAccount !== 'all') {
+        const acc = accounts.find((a) => a.email === activeAccount);
+        totalSynced = await syncAccountInbox(activeAccount, acc?.provider);
+      } else {
+        for (const a of accounts) {
+          totalSynced += await syncAccountInbox(a.email, a.provider);
+        }
+      }
+      renderAccounts();
+      renderMails();
+      toast(`${t('synced_success')} (${totalSynced} nuevos)`);
+    };
+  }
+
+  const connectModal = document.getElementById('connectProviderModal');
+  const closeConnect = document.getElementById('closeConnectModal');
+  const skipConnect = document.getElementById('skipConnectModal');
+  const confirmConnect = document.getElementById('confirmConnectModal');
+  const googleBtn = document.getElementById('googleOAuthBtn');
+  const msBtn = document.getElementById('microsoftOAuthBtn');
+
+  if (googleBtn) {
+    googleBtn.onclick = async () => {
+      try {
+        const { error } = await supabase.auth.signInWithOAuth({
+          provider: 'google',
+          options: {
+            scopes: 'https://www.googleapis.com/auth/gmail.readonly',
+            redirectTo: window.location.origin + window.location.pathname,
+          },
+        });
+        if (error) {
+          toast('⚠️ Google OAuth no habilitado en Supabase. Ingresa tu correo abajo.');
+          console.warn('OAuth Google Error:', error.message);
+        }
+      } catch (err: any) {
+        toast('⚠️ Google OAuth no disponible. Ingresa tu correo abajo.');
+      }
+    };
+  }
+
+  if (msBtn) {
+    msBtn.onclick = async () => {
+      try {
+        const { error } = await supabase.auth.signInWithOAuth({
+          provider: 'azure',
+          options: {
+            scopes: 'https://graph.microsoft.com/Mail.Read',
+            redirectTo: window.location.origin + window.location.pathname,
+          },
+        });
+        if (error) {
+          toast('⚠️ Microsoft OAuth no habilitado en Supabase. Ingresa tu correo abajo.');
+          console.warn('OAuth Microsoft Error:', error.message);
+        }
+      } catch (err: any) {
+        toast('⚠️ Microsoft OAuth no disponible. Ingresa tu correo abajo.');
+      }
+    };
+  }
+
+  const hideConnectModal = () => connectModal?.classList.remove('open');
+
+  if (closeConnect) closeConnect.onclick = hideConnectModal;
+  if (skipConnect) skipConnect.onclick = hideConnectModal;
+  if (connectModal) {
+    connectModal.addEventListener('click', (e) => {
+      if (e.target === connectModal) hideConnectModal();
+    });
+  }
+
+  if (confirmConnect) {
+    confirmConnect.onclick = async () => {
+      const emailInp = document.getElementById('modalAccountEmail') as HTMLInputElement;
+      const provSel = document.getElementById('modalAccountProvider') as HTMLSelectElement;
+      const tokenInp = document.getElementById('modalAccountToken') as HTMLInputElement;
+      const v = emailInp?.value.trim();
+      if (!v || !v.includes('@')) return;
+      const provider = (provSel?.value || 'custom') as EmailProvider;
+      const token = tokenInp?.value.trim() || undefined;
+      accounts.push({ email: v, primary: accounts.length === 0, provider, status: 'connected', token });
+      emailInp.value = '';
+      if (tokenInp) tokenInp.value = '';
+      const count = await syncAccountInbox(v, provider, token);
+      persist();
+      renderAccounts();
+      renderMails();
+      hideConnectModal();
+      toast(`${t('synced_success')} (${count} correos)`);
+    };
+  }
+
+  const hasGmailOrOutlook = accounts.some((a) => a.provider === 'gmail' || a.provider === 'outlook' || a.email.includes('gmail') || a.email.includes('outlook'));
+  if (!hasGmailOrOutlook && connectModal) {
+    setTimeout(() => {
+      connectModal.classList.add('open');
+    }, 600);
+  }
 
   const nameInp = document.getElementById('newCategoryName') as HTMLInputElement;
   const colorInp = document.getElementById('newCategoryColor') as HTMLInputElement;

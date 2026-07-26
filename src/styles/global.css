@@ -626,3 +626,105 @@ body{
   font-size:.68rem; border-radius:6px; background:rgba(245,183,61,.16);
   color:#f5b73d; border:1px solid rgba(245,183,61,.4);
 }
+
+/* ===== Connect / Standalone Modal ===== */
+.connect-modal {
+  display: flex !important;
+  flex-direction: column !important;
+  width: min(520px, 94vw) !important;
+  max-height: 90vh !important;
+  overflow-y: auto !important;
+  padding: 1.75rem 2rem !important;
+  border-radius: 20px !important;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6), 0 0 0 1px var(--border-strong) !important;
+  grid-template-columns: none !important;
+}
+
+.connect-modal .modal-header {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  border-bottom: 1px solid var(--border) !important;
+  padding: 0 0 1rem 0 !important;
+  margin-bottom: 1.25rem !important;
+  width: 100% !important;
+}
+
+.connect-modal .modal-header h2 {
+  margin: 0 !important;
+  font-size: 1.2rem !important;
+  font-weight: 700 !important;
+  letter-spacing: -0.01em !important;
+}
+
+.oauth-btn {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 0.6rem !important;
+  padding: 0.75rem 1rem !important;
+  border-radius: 12px !important;
+  font-size: 0.92rem !important;
+  font-weight: 600 !important;
+  cursor: pointer !important;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, filter 0.15s ease !important;
+  border: none !important;
+  color: #ffffff !important;
+  width: 100% !important;
+}
+
+.oauth-btn:hover {
+  transform: translateY(-1px) !important;
+  filter: brightness(1.08) !important;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.25) !important;
+}
+
+.oauth-btn.google {
+  background: linear-gradient(135deg, #ea4335, #d93025) !important;
+}
+
+.oauth-btn.microsoft {
+  background: linear-gradient(135deg, #00a4ef, #0078d4) !important;
+}
+
+.modal-divider {
+  display: flex !important;
+  align-items: center !important;
+  text-align: center !important;
+  margin: 1.25rem 0 !important;
+  color: var(--fg-mute) !important;
+  font-size: 0.82rem !important;
+  font-weight: 500 !important;
+}
+
+.modal-divider::before,
+.modal-divider::after {
+  content: '' !important;
+  flex: 1 !important;
+  border-bottom: 1px solid var(--border) !important;
+}
+
+.modal-divider span {
+  padding: 0 0.75rem !important;
+}
+
+.form-field {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 0.4rem !important;
+  margin-bottom: 1rem !important;
+  width: 100% !important;
+}
+
+.form-field label {
+  font-size: 0.84rem !important;
+  font-weight: 600 !important;
+  color: var(--fg-dim) !important;
+}
+
+.form-field .input {
+  width: 100% !important;
+  box-sizing: border-box !important;
+  padding: 0.65rem 0.9rem !important;
+  border-radius: 10px !important;
+}
