@@ -2,6 +2,8 @@ import {
   KEYS, store, t, applyTheme, applyI18n,
   type Account, type Category, type Profile, type Mail, type Attachment, type Folder,
 } from './common';
+import { supabase } from './supabase';
+
 
 // ---------- Defaults ----------
 const DEFAULT_ACCOUNTS: Account[] = [
@@ -97,14 +99,112 @@ let activeTab: string = 'all';
 let searchQuery = '';
 let currentPage = 1;
 
+let currentUser: any = null;
+
 const persist = (): void => {
   store.set(KEYS.accounts, accounts);
   store.set(KEYS.categories, categories);
   store.set(KEYS.profile, profile);
   store.set(KEYS.pageSize, pageSize);
   store.set(KEYS.mails, mails);
+
+  // Sync profile & preferences to Supabase asynchronously
+  if (currentUser) {
+    supabase.from('profiles').upsert({
+      id: currentUser.id,
+      name: profile.name,
+      email: profile.email,
+      phone: profile.phone,
+      signature: profile.signature,
+      page_size: pageSize,
+    }).then(({ error }) => {
+      if (error) console.warn('Error al actualizar perfil en Supabase:', error);
+    });
+  }
 };
-const uidCat = (): string => 'c_' + Math.random().toString(36).slice(2, 9);
+
+async function syncSupabaseData(): Promise<void> {
+  try {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session || !session.user) {
+      window.location.href = './';
+      return;
+    }
+    currentUser = session.user;
+
+    // 1. Cargar o inicializar Perfil
+    const { data: pData } = await supabase.from('profiles').select('*').eq('id', currentUser.id).single();
+    if (pData) {
+      profile = {
+        name: pData.name || currentUser.user_metadata?.full_name || 'Operador Triade',
+        email: pData.email || currentUser.email || 'operaciones@triade.com',
+        phone: pData.phone || '+58 000 000 0000',
+        signature: pData.signature || '— Triade · Levantamiento Artificial y Rehabilitación de Pozos',
+      };
+    } else {
+      profile.email = currentUser.email || profile.email;
+      profile.name = currentUser.user_metadata?.full_name || profile.name;
+    }
+
+    // 2. Cargar Cuentas del usuario
+    const { data: aData } = await supabase.from('user_accounts').select('*').eq('user_id', currentUser.id);
+    if (aData && aData.length > 0) {
+      accounts = aData.map((a: any) => ({ email: a.email, primary: a.is_primary }));
+    }
+
+    // 3. Cargar Categorías
+    const { data: cData } = await supabase.from('categories').select('*').eq('user_id', currentUser.id);
+    if (cData && cData.length > 0) {
+      categories = cData.map((c: any) => ({ id: c.id, name: c.name, color: c.color, keywords: c.keywords || [] }));
+    }
+
+    // 4. Cargar Correos
+    const { data: mData } = await supabase.from('mails').select('*').eq('user_id', currentUser.id).order('created_at', { ascending: false });
+    if (mData && mData.length > 0) {
+      mails = mData.map((m: any) => ({
+        id: m.id,
+        from: m.from_name,
+        fromEmail: m.from_email || '',
+        to: m.to_address,
+        subject: m.subject,
+        body: m.body,
+        bodyHtml: m.body_html || '',
+        account: m.account,
+        time: m.time_label || new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        unread: m.unread,
+        starred: m.starred,
+        folder: m.folder as Folder,
+        scheduledFor: m.scheduled_for,
+      }));
+    } else {
+      // Seed inicial en Supabase si es la primera vez que ingresa
+      const seeded = seedMails();
+      mails = seeded;
+      const dbRows = seeded.map((m) => ({
+        user_id: currentUser.id,
+        from_name: m.from,
+        to_address: m.to || m.account,
+        subject: m.subject,
+        body: m.body,
+        account: m.account,
+        folder: m.folder,
+        unread: m.unread,
+        starred: m.starred,
+        time_label: m.time,
+      }));
+      await supabase.from('mails').insert(dbRows);
+    }
+
+    persist();
+    hydrateProfileForm();
+    renderAccounts();
+    renderMails();
+    renderCategoriesEditor();
+  } catch (err) {
+    console.error('Error al sincronizar datos de Supabase:', err);
+  }
+}
+
 
 // ---------- Classification / Filtering ----------
 function classify(subject: string): string {
@@ -809,6 +909,8 @@ document.addEventListener('DOMContentLoaded', () => {
   renderCategoriesEditor();
   hydrateProfileForm();
   hydrateAppearance();
+  syncSupabaseData();
+
 
   document.querySelectorAll<HTMLElement>('.sidebar .nav-item[data-folder]').forEach((n) => {
     n.onclick = () => {
@@ -1005,8 +1107,9 @@ document.addEventListener('DOMContentLoaded', () => {
       userMenu.classList.remove('open');
     }
   });
-  document.getElementById('logoutBtn')!.onclick = () => {
+  document.getElementById('logoutBtn')!.onclick = async () => {
     if (confirm(t('confirm_logout'))) {
+      await supabase.auth.signOut();
       store.del(KEYS.session);
       window.location.href = './';
     }
@@ -1045,7 +1148,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const addCat = () => {
     const name = nameInp.value.trim();
     if (!name) return;
-    categories.push({ id: uidCat(), name, color: colorInp.value || '#4c8bf5', keywords: [] });
+    categories.push({ id: uid('c'), name, color: colorInp.value || '#4c8bf5', keywords: [] });
     nameInp.value = '';
     persist();
     renderCategoriesEditor();

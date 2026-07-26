@@ -3,6 +3,7 @@
   "include": [".astro/types.d.ts", "**/*"],
   "exclude": ["dist"],
   "compilerOptions": {
+    "target": "ES2022",
     "strictNullChecks": true,
     "allowJs": true,
     "checkJs": false

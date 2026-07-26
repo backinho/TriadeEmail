@@ -4,45 +4,113 @@ import BaseLayout from '../layouts/BaseLayout.astro';
 
 <BaseLayout title="Triade Mail — Crear cuenta">
   <main class="auth-wrap">
-  <section class="glass glass-strong auth-card">
-    <div class="logo">
-      <svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M16 16 L6 6 M16 16 L26 6 M16 16 L16 28" />
-      </svg>
-      <b>TRIADE · MAIL</b>
-    </div>
-    <h1 data-i18n="create_title">Crea tu cuenta</h1>
-    <p class="sub" data-i18n="create_sub">Une todos tus correos en un solo lugar</p>
+    <section class="glass glass-strong auth-card">
+      <div class="logo">
+        <svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M16 16 L6 6 M16 16 L26 6 M16 16 L16 28" />
+        </svg>
+        <b>TRIADE · MAIL</b>
+      </div>
+      <h1 data-i18n="create_title">Crea tu cuenta</h1>
+      <p class="sub" data-i18n="create_sub">Une todos tus correos en un solo lugar</p>
 
-    <form onsubmit="event.preventDefault(); location.href='./app';">
-      <div class="field">
-        <label data-i18n="full_name">Nombre completo</label>
-        <input class="input" type="text" required placeholder="Ada Lovelace" />
-      </div>
-      <div class="field">
-        <label data-i18n="email">Correo electrónico</label>
-        <input class="input" type="email" required placeholder="tu@triade.com" />
-      </div>
-      <div class="field">
-        <label data-i18n="password">Contraseña</label>
-        <input class="input" type="password" required placeholder="••••••••" />
-      </div>
-      <div class="field">
-        <label data-i18n="confirm_password">Confirmar contraseña</label>
-        <input class="input" type="password" required placeholder="••••••••" />
-      </div>
-      <button class="btn primary block" data-i18n="create_account">Crear cuenta</button>
-    </form>
+      <div id="registerAlert" style="display:none; padding:.75rem 1rem; margin-bottom:1rem; border-radius:8px; font-size:.875rem; background:rgba(230,57,70,0.15); border:1px solid var(--accent); color:#ff6b6b;"></div>
+      <div id="registerSuccess" style="display:none; padding:.75rem 1rem; margin-bottom:1rem; border-radius:8px; font-size:.875rem; background:rgba(60,207,145,0.15); border:1px solid #3ccf91; color:#3ccf91;"></div>
 
-    <div class="divider">— · —</div>
-    <div class="auth-links" style="justify-content:center; gap:.4rem">
-      <span data-i18n="already_account">¿Ya tienes cuenta?</span>
-      <a href="./" style="color:var(--accent)" data-i18n="sign_in_link">Inicia sesión</a>
-    </div>
-  </section>
-</main>
+      <form id="registerForm">
+        <div class="field">
+          <label data-i18n="full_name">Nombre completo</label>
+          <input id="regFullName" class="input" type="text" required placeholder="Ada Lovelace" />
+        </div>
+        <div class="field">
+          <label data-i18n="email">Correo electrónico</label>
+          <input id="regEmail" class="input" type="email" required placeholder="tu@triade.com" />
+        </div>
+        <div class="field">
+          <label data-i18n="password">Contraseña</label>
+          <input id="regPassword" class="input" type="password" required placeholder="••••••••" minlength="6" />
+        </div>
+        <div class="field">
+          <label data-i18n="confirm_password">Confirmar contraseña</label>
+          <input id="regConfirmPassword" class="input" type="password" required placeholder="••••••••" minlength="6" />
+        </div>
+        <button id="registerBtn" type="submit" class="btn primary block" data-i18n="create_account">Crear cuenta</button>
+      </form>
+
+      <div class="divider">— · —</div>
+      <div class="auth-links" style="justify-content:center; gap:.4rem">
+        <span data-i18n="already_account">¿Ya tienes cuenta?</span>
+        <a href="./" style="color:var(--accent)" data-i18n="sign_in_link">Inicia sesión</a>
+      </div>
+    </section>
+  </main>
 </BaseLayout>
 
 <script>
   import '../scripts/common.ts';
+  import { supabase } from '../scripts/supabase';
+
+  const alertBox = document.getElementById('registerAlert') as HTMLDivElement;
+  const successBox = document.getElementById('registerSuccess') as HTMLDivElement;
+  const registerForm = document.getElementById('registerForm') as HTMLFormElement;
+  const fullNameInput = document.getElementById('regFullName') as HTMLInputElement;
+  const emailInput = document.getElementById('regEmail') as HTMLInputElement;
+  const passwordInput = document.getElementById('regPassword') as HTMLInputElement;
+  const confirmPasswordInput = document.getElementById('regConfirmPassword') as HTMLInputElement;
+  const submitBtn = document.getElementById('registerBtn') as HTMLButtonElement;
+
+  registerForm?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    alertBox.style.display = 'none';
+    successBox.style.display = 'none';
+
+    const fullName = fullNameInput.value.trim();
+    const email = emailInput.value.trim();
+    const password = passwordInput.value;
+    const confirmPassword = confirmPasswordInput.value;
+
+    if (password !== confirmPassword) {
+      alertBox.textContent = 'Las contraseñas no coinciden.';
+      alertBox.style.display = 'block';
+      return;
+    }
+
+    const originalBtnText = submitBtn.textContent;
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Creando cuenta…';
+
+    try {
+      const { data, error } = await supabase.auth.signUp({
+        email,
+        password,
+        options: {
+          data: {
+            full_name: fullName,
+          },
+        },
+      });
+
+      if (error) {
+        alertBox.textContent = error.message;
+        alertBox.style.display = 'block';
+        submitBtn.disabled = false;
+        submitBtn.textContent = originalBtnText;
+      } else if (data.session) {
+        // Logged in automatically
+        window.location.href = './app';
+      } else if (data.user) {
+        // Confirmation required or account created
+        successBox.textContent = '¡Cuenta creada con éxito! Puedes iniciar sesión ahora.';
+        successBox.style.display = 'block';
+        setTimeout(() => {
+          window.location.href = './';
+        }, 1500);
+      }
+    } catch (err: any) {
+      alertBox.textContent = err?.message || 'Error al registrar la cuenta.';
+      alertBox.style.display = 'block';
+      submitBtn.disabled = false;
+      submitBtn.textContent = originalBtnText;
+    }
+  });
 </script>

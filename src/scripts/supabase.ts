@@ -1,11 +1,14 @@
 import { createClient } from '@supabase/supabase-js';
 
-const url = import.meta.env.VITE_SUPABASE_URL as string;
-const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
+const url =
+  (import.meta.env.PUBLIC_SUPABASE_URL as string) ||
+  (import.meta.env.VITE_SUPABASE_URL as string) ||
+  'https://fbvgznyuzwpfcscxxfvr.supabase.co';
 
-if (!url || !anonKey) {
-  throw new Error('Faltan VITE_SUPABASE_URL o VITE_SUPABASE_ANON_KEY en el entorno.');
-}
+const anonKey =
+  (import.meta.env.PUBLIC_SUPABASE_ANON_KEY as string) ||
+  (import.meta.env.VITE_SUPABASE_ANON_KEY as string) ||
+  'sb_publishable_V8UYsBCqZJqEtjYV0xKeKg_9y9yOUQt';
 
 export const supabase = createClient(url, anonKey, {
   auth: {

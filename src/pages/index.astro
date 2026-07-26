@@ -4,43 +4,95 @@ import BaseLayout from '../layouts/BaseLayout.astro';
 
 <BaseLayout title="Triade Mail — Iniciar sesión">
   <main class="auth-wrap">
-  <section class="glass glass-strong auth-card">
-    <div class="logo">
-      <svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M16 16 L6 6 M16 16 L26 6 M16 16 L16 28" />
-      </svg>
-      <b>TRIADE · MAIL</b>
-    </div>
-    <h1 data-i18n="welcome_back">Bienvenido de nuevo</h1>
-    <p class="sub" data-i18n="sign_in_sub">Accede a tu bandeja unificada Triade</p>
+    <section class="glass glass-strong auth-card">
+      <div class="logo">
+        <svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M16 16 L6 6 M16 16 L26 6 M16 16 L16 28" />
+        </svg>
+        <b>TRIADE · MAIL</b>
+      </div>
+      <h1 data-i18n="welcome_back">Bienvenido de nuevo</h1>
+      <p class="sub" data-i18n="sign_in_sub">Accede a tu bandeja unificada Triade</p>
 
-    <form id="loginForm" onsubmit="event.preventDefault(); location.href='./app';">
-      <div class="field">
-        <label data-i18n="email">Correo electrónico</label>
-        <input class="input" type="email" required data-i18n-placeholder="email" placeholder="tu@triade.com" />
-      </div>
-      <div class="field">
-        <label data-i18n="password">Contraseña</label>
-        <input class="input" type="password" required placeholder="••••••••" />
-      </div>
-      <div class="auth-links" style="margin-bottom:1rem">
-        <label style="display:flex; gap:.4rem; align-items:center; color:var(--fg-dim); font-size:.85rem">
-          <input type="checkbox" /> <span data-i18n="remember">Recordarme</span>
-        </label>
-        <a href="./forgot" data-i18n="forgot">¿Olvidaste tu contraseña?</a>
-      </div>
-      <button type="submit" class="btn primary block" data-i18n="sign_in">Iniciar sesión</button>
-    </form>
+      <div id="authAlert" style="display:none; padding:.75rem 1rem; margin-bottom:1rem; border-radius:8px; font-size:.875rem; background:rgba(230,57,70,0.15); border:1px solid var(--accent); color:#ff6b6b;"></div>
 
-    <div class="divider">— · —</div>
-    <div class="auth-links" style="justify-content:center; gap:.4rem">
-      <span data-i18n="no_account">¿No tienes cuenta?</span>
-      <a href="./register" style="color:var(--accent)" data-i18n="create_account">Crear cuenta</a>
-    </div>
-  </section>
-</main>
+      <form id="loginForm">
+        <div class="field">
+          <label data-i18n="email">Correo electrónico</label>
+          <input id="loginEmail" class="input" type="email" required data-i18n-placeholder="email" placeholder="tu@triade.com" />
+        </div>
+        <div class="field">
+          <label data-i18n="password">Contraseña</label>
+          <input id="loginPassword" class="input" type="password" required placeholder="••••••••" />
+        </div>
+        <div class="auth-links" style="margin-bottom:1rem">
+          <label style="display:flex; gap:.4rem; align-items:center; color:var(--fg-dim); font-size:.85rem">
+            <input type="checkbox" id="rememberMe" /> <span data-i18n="remember">Recordarme</span>
+          </label>
+          <a href="./forgot" data-i18n="forgot">¿Olvidaste tu contraseña?</a>
+        </div>
+        <button id="loginSubmitBtn" type="submit" class="btn primary block" data-i18n="sign_in">Iniciar sesión</button>
+      </form>
+
+      <div class="divider">— · —</div>
+      <div class="auth-links" style="justify-content:center; gap:.4rem">
+        <span data-i18n="no_account">¿No tienes cuenta?</span>
+        <a href="./register" style="color:var(--accent)" data-i18n="create_account">Crear cuenta</a>
+      </div>
+    </section>
+  </main>
 </BaseLayout>
 
 <script>
   import '../scripts/common.ts';
+  import { supabase } from '../scripts/supabase';
+
+  const alertBox = document.getElementById('authAlert') as HTMLDivElement;
+  const loginForm = document.getElementById('loginForm') as HTMLFormElement;
+  const emailInput = document.getElementById('loginEmail') as HTMLInputElement;
+  const passwordInput = document.getElementById('loginPassword') as HTMLInputElement;
+  const submitBtn = document.getElementById('loginSubmitBtn') as HTMLButtonElement;
+
+  // Check if session already exists
+  supabase.auth.getSession().then(({ data: { session } }) => {
+    if (session) {
+      window.location.href = './app';
+    }
+  });
+
+  loginForm?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    alertBox.style.display = 'none';
+    const email = emailInput.value.trim();
+    const password = passwordInput.value;
+
+    if (!email || !password) return;
+
+    const originalBtnText = submitBtn.textContent;
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Iniciando sesión…';
+
+    try {
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
+
+      if (error) {
+        alertBox.textContent = error.message.includes('Invalid login credentials')
+          ? 'Correo o contraseña incorrectos.'
+          : error.message;
+        alertBox.style.display = 'block';
+        submitBtn.disabled = false;
+        submitBtn.textContent = originalBtnText;
+      } else if (data.session) {
+        window.location.href = './app';
+      }
+    } catch (err: any) {
+      alertBox.textContent = err?.message || 'Error inesperado al iniciar sesión.';
+      alertBox.style.display = 'block';
+      submitBtn.disabled = false;
+      submitBtn.textContent = originalBtnText;
+    }
+  });
 </script>
