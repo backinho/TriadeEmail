@@ -1,15 +1,6 @@
-<!doctype html>
-<html lang="es">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Triade Mail</title>
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="./styles.css" />
-<script src="./common.js"></script>
-</head>
-<body>
-<div class="space-bg"></div>
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+---
 
 <div class="app">
   <!-- TOPBAR -->
@@ -159,8 +150,7 @@
     </div>
 
     <div class="compose-body" style="padding-top:.6rem">
-      <div id="composeBody" class="compose-editor" contenteditable="true"
-           data-i18n-placeholder="compose_placeholder"></div>
+      <div id="composeBody" class="compose-editor" contenteditable="true" data-i18n-placeholder="compose_placeholder"></div>
       <div class="attach-list" id="attachList"></div>
     </div>
 
@@ -275,7 +265,7 @@
         <div id="categoriesEdit"></div>
         <div class="row-inline">
           <input class="input" id="newCategoryName" placeholder="Nombre de la categoría…" />
-          <input type="color" id="newCategoryColor" value="#4c8bf5" class="color-pill"/>
+          <input type="color" id="newCategoryColor" value="#4c8bf5" class="color-pill" />
           <button class="btn primary" id="addCategoryBtn" data-i18n="add_category">Añadir categoría</button>
         </div>
       </section>
@@ -340,6 +330,7 @@
   </div>
 </div>
 
-<script src="./app.js"></script>
-</body>
-</html>
+<script>
+  import '../scripts/common.ts';
+  import '../scripts/app.ts';
+</script>
