@@ -2,7 +2,8 @@
 import BaseLayout from '../layouts/BaseLayout.astro';
 ---
 
-<div class="app">
+<BaseLayout title="Triade Mail — Bandeja">
+  <div class="app">
   <!-- TOPBAR -->
   <header class="topbar glass">
     <button class="btn icon ghost menu-toggle" id="menuToggle" data-i18n-title="menu" title="Menú" aria-label="Menu">
@@ -329,6 +330,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     </div>
   </div>
 </div>
+</BaseLayout>
 
 <script>
   import '../scripts/common.ts';
