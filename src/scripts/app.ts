@@ -1463,20 +1463,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     };
   });
 
-  document.getElementById('addAccountBtn')!.onclick = async () => {
-    const inp = document.getElementById('newAccountEmail') as HTMLInputElement;
-    const provSel = document.getElementById('newAccountProvider') as HTMLSelectElement;
-    const v = inp.value.trim().toLowerCase();
-    if (!v || !v.includes('@')) return;
-    const provider = (provSel?.value || 'custom') as EmailProvider;
-    inp.value = '';
-    activeAccount = 'all';
-    const newMailsCount = await syncAccountInbox(v, provider);
-    persist();
-    renderAccounts();
-    renderMails();
-    toast(`${t('synced_success')} (${newMailsCount} correos)`);
-  };
+
 
   const syncBtn = document.getElementById('syncInboxBtn');
   if (syncBtn) {
