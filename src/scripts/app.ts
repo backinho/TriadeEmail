@@ -8,12 +8,7 @@ import { fetchRealGmailMails, fetchRealOutlookMails } from './emailApi';
 
 // ---------- Defaults ----------
 const DEFAULT_ACCOUNTS: Account[] = [];
-const DEFAULT_CATEGORIES: Category[] = [
-  { id: 'c_work', name: 'Trabajo', color: '#e63946', keywords: ['reunión', 'meeting', 'proyecto', 'project', 'informe', 'report', 'drive', 'teams'] },
-  { id: 'c_finance', name: 'Finanzas', color: '#4c8bf5', keywords: ['factura', 'invoice', 'pago', 'payment', 'presupuesto', 'budget', 'gcp', 'cloud'] },
-  { id: 'c_promo', name: 'Promociones', color: '#a06eff', keywords: ['oferta', 'offer', 'descuento', 'discount', 'promo', 'youtube'] },
-  { id: 'c_social', name: 'Social', color: '#3ccf91', keywords: ['invitación', 'invitation', 'evento', 'event', 'conexión', 'calendar'] },
-];
+const DEFAULT_CATEGORIES: Category[] = [];
 const DEFAULT_PROFILE: Profile = {
   name: 'Usuario Triade',
   email: '',
@@ -67,6 +62,17 @@ const persist = (): void => {
     }).then(({ error }) => {
       if (error) console.warn('Error al actualizar perfil en Supabase:', error);
     });
+
+    for (const cat of categories) {
+      supabase.from('categories').upsert({
+        user_id: currentUser.id,
+        name: cat.name,
+        color: cat.color,
+        keywords: cat.keywords,
+      }, { onConflict: 'user_id,name' }).then(({ error }) => {
+        if (error) console.warn('Error al guardar categoría en Supabase:', error);
+      });
+    }
   }
 };
 
@@ -81,6 +87,21 @@ async function fetchGoogleUserEmail(accessToken: string): Promise<string | null>
     }
   } catch (err) {
     console.warn('Could not fetch Google userinfo:', err);
+  }
+  return null;
+}
+
+async function fetchOutlookUserEmail(accessToken: string): Promise<string | null> {
+  try {
+    const res = await fetch('https://graph.microsoft.com/v1.0/me', {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (res.ok) {
+      const data = await res.json();
+      return data.mail || data.userPrincipalName || null;
+    }
+  } catch (err) {
+    console.warn('Could not fetch Outlook userinfo:', err);
   }
   return null;
 }
@@ -102,12 +123,13 @@ async function handleDirectOAuthRedirect(): Promise<boolean> {
   if (!tokenToUse) return false;
 
   (window as any).supabaseProviderToken = tokenToUse;
-  const userEmail = await fetchGoogleUserEmail(tokenToUse);
+  let userEmail = await fetchGoogleUserEmail(tokenToUse);
+  if (!userEmail) userEmail = await fetchOutlookUserEmail(tokenToUse);
 
   if (userEmail) {
     history.replaceState(null, '', window.location.pathname);
-    const provider: EmailProvider = 'gmail';
-    const accIndex = accounts.findIndex((a) => a.email.toLowerCase() === userEmail.toLowerCase());
+    const provider: EmailProvider = userEmail.includes('outlook') || userEmail.includes('hotmail') || userEmail.includes('live') ? 'outlook' : 'gmail';
+    const accIndex = accounts.findIndex((a) => a.email.toLowerCase() === userEmail!.toLowerCase());
     if (accIndex !== -1) {
       accounts[accIndex].token = tokenToUse;
       accounts[accIndex].access_token = tokenToUse;
@@ -123,12 +145,21 @@ async function handleDirectOAuthRedirect(): Promise<boolean> {
       });
     }
 
+    if (currentUser) {
+      await supabase.from('user_accounts').upsert({
+        user_id: currentUser.id,
+        email: userEmail.toLowerCase(),
+        access_token: tokenToUse,
+        is_primary: accounts.length === 1,
+      }, { onConflict: 'user_id,email' });
+    }
+
     activeAccount = userEmail.toLowerCase();
     const count = await syncAccountInbox(userEmail, provider, tokenToUse);
     persist();
     renderAccounts();
     renderMails();
-    toast(`✔ Cuenta ${userEmail} conectada con Google OAuth (${count} correos).`);
+    toast(`✔ Cuenta ${userEmail} conectada con ${provider === 'gmail' ? 'Google' : 'Microsoft'} OAuth (${count} correos).`);
     return true;
   }
   return false;
@@ -150,29 +181,30 @@ async function syncSupabaseData(): Promise<void> {
     if (providerToken) {
       (window as any).supabaseProviderToken = providerToken;
     }
-    const userEmail = (session.user.email || currentUser.email || '').toLowerCase().trim();
 
     // 1. Cargar o inicializar Perfil
     const { data: pData } = await supabase.from('profiles').select('*').eq('id', currentUser.id).single();
     if (pData) {
       profile = {
         name: pData.name || currentUser.user_metadata?.full_name || 'Usuario Triade',
-        email: pData.email || userEmail || '',
+        email: pData.email || session.user.email || '',
         phone: pData.phone || '',
         signature: pData.signature || '— Enviado desde Triade Mail',
       };
     } else {
-      profile.email = userEmail || profile.email || '';
+      profile.email = session.user.email || profile.email || '';
       profile.name = currentUser.user_metadata?.full_name || profile.name || 'Usuario Triade';
     }
 
-    // 2. Cargar Categorías
+    // 2. Cargar Categorías desde la tabla de Supabase DB
     const { data: cData } = await supabase.from('categories').select('*').eq('user_id', currentUser.id);
-    if (cData && cData.length > 0) {
+    if (cData) {
       categories = cData.map((c: any) => ({ id: c.id, name: c.name, color: c.color, keywords: c.keywords || [] }));
+    } else {
+      categories = [];
     }
 
-    // 3. Cargar Cuentas del usuario guardadas en Supabase (con sus tokens OAuth)
+    // 3. Cargar Cuentas del usuario guardadas en Supabase (solo las conectadas por OAuth)
     const { data: dbAccounts } = await supabase.from('user_accounts').select('*').eq('user_id', currentUser.id);
 
     if (dbAccounts !== null && dbAccounts.length > 0) {
@@ -189,39 +221,42 @@ async function syncSupabaseData(): Promise<void> {
         token: a.access_token || undefined,
       }));
     } else {
-      accounts = store.get<Account[]>(KEYS.accounts, []).filter((a) => a.email && (a.provider === 'gmail' || a.provider === 'outlook'));
+      accounts = [];
     }
 
-    // Asegurar que si el usuario inició sesión vía Google/Microsoft OAuth, su cuenta y token se registren y guarden en Supabase DB
-    if (userEmail && userEmail.includes('@')) {
-      const provider: EmailProvider = (userEmail.includes('outlook') || userEmail.includes('hotmail') || userEmail.includes('live')) ? 'outlook' : 'gmail';
-      const existingAcc = accounts.find((a) => a.email.toLowerCase() === userEmail);
-
-      const effToken = providerToken || existingAcc?.access_token || existingAcc?.token;
-
-      if (!existingAcc) {
-        accounts.push({
-          email: userEmail,
-          primary: accounts.length === 0,
-          provider,
-          status: 'connected',
-          access_token: effToken,
-          token: effToken,
-        });
-      } else if (effToken) {
-        existingAcc.access_token = effToken;
-        existingAcc.token = effToken;
-        existingAcc.status = 'connected';
+    // Si retornó un providerToken de OAuth, obtener el correo real de la API de Google/Microsoft (no usar el login email)
+    if (providerToken) {
+      let oauthEmail = await fetchGoogleUserEmail(providerToken);
+      if (!oauthEmail) {
+        oauthEmail = await fetchOutlookUserEmail(providerToken);
       }
 
-      if (effToken) {
-        // Guardar inmediatamente en la tabla user_accounts de Supabase DB
+      if (oauthEmail) {
+        const cleanEmail = oauthEmail.toLowerCase().trim();
+        const provider: EmailProvider = (cleanEmail.includes('outlook') || cleanEmail.includes('hotmail') || cleanEmail.includes('live')) ? 'outlook' : 'gmail';
+        const existingAcc = accounts.find((a) => a.email.toLowerCase() === cleanEmail);
+
+        if (!existingAcc) {
+          accounts.push({
+            email: cleanEmail,
+            primary: accounts.length === 0,
+            provider,
+            status: 'connected',
+            access_token: providerToken,
+            token: providerToken,
+          });
+        } else {
+          existingAcc.access_token = providerToken;
+          existingAcc.token = providerToken;
+          existingAcc.status = 'connected';
+        }
+
         const { error: accErr } = await supabase.from('user_accounts').upsert({
           user_id: currentUser.id,
-          email: userEmail,
-          access_token: effToken,
+          email: cleanEmail,
+          access_token: providerToken,
           refresh_token: session.provider_refresh_token || null,
-          is_primary: true,
+          is_primary: accounts.length === 1,
         }, { onConflict: 'user_id,email' });
 
         if (accErr) console.warn('Error al guardar/actualizar user_accounts en Supabase:', accErr);
@@ -849,7 +884,12 @@ function renderCategoriesEditor(): void {
       renderMails();
     };
     card.querySelector<HTMLElement>('[data-del]')!.onclick = () => {
-      categories.splice(idx, 1);
+      const [removed] = categories.splice(idx, 1);
+      if (removed && currentUser) {
+        supabase.from('categories').delete().eq('user_id', currentUser.id).eq('name', removed.name).then(({ error }) => {
+          if (error) console.warn('Error al eliminar categoría en Supabase:', error);
+        });
+      }
       if (activeTab === cat.id) activeTab = 'all';
       persist();
       renderCategoriesEditor();
@@ -1461,55 +1501,58 @@ document.addEventListener('DOMContentLoaded', async () => {
   const skipConnect = document.getElementById('skipConnectModal');
   const googleBtn = document.getElementById('googleOAuthBtn');
   const msBtn = document.getElementById('microsoftOAuthBtn');
+  const settingsGoogleBtn = document.getElementById('settingsGoogleOAuthBtn');
+  const settingsMsBtn = document.getElementById('settingsMicrosoftOAuthBtn');
 
-  if (googleBtn) {
-    googleBtn.onclick = async () => {
-      try {
-        const { error } = await supabase.auth.signInWithOAuth({
-          provider: 'google',
-          options: {
-            scopes: 'https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/userinfo.email',
-            redirectTo: window.location.origin + window.location.pathname,
-          },
-        });
-        if (error) {
-          console.warn('Supabase OAuth Google Error:', error.message);
-          let clientId = (import.meta as any).env.PUBLIC_GOOGLE_CLIENT_ID || (window as any).PUBLIC_GOOGLE_CLIENT_ID;
-          if (!clientId) {
-            clientId = prompt('Ingresa tu Google Client ID para autenticar con Google OAuth:');
-          }
-          if (clientId) {
-            (window as any).PUBLIC_GOOGLE_CLIENT_ID = clientId.trim();
-            const redirectUri = encodeURIComponent(window.location.origin + window.location.pathname);
-            const scope = encodeURIComponent('https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/userinfo.email');
-            window.location.href = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId.trim()}&redirect_uri=${redirectUri}&response_type=token&scope=${scope}`;
-          }
+  const triggerGoogleOAuth = async () => {
+    try {
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          scopes: 'https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/userinfo.email',
+          redirectTo: window.location.origin + window.location.pathname,
+        },
+      });
+      if (error) {
+        console.warn('Supabase OAuth Google Error:', error.message);
+        let clientId = (import.meta as any).env.PUBLIC_GOOGLE_CLIENT_ID || (window as any).PUBLIC_GOOGLE_CLIENT_ID;
+        if (!clientId) {
+          clientId = prompt('Ingresa tu Google Client ID para autenticar con Google OAuth:');
         }
-      } catch (err: any) {
-        toast('⚠️ Error al conectar con Google OAuth.');
+        if (clientId) {
+          (window as any).PUBLIC_GOOGLE_CLIENT_ID = clientId.trim();
+          const redirectUri = encodeURIComponent(window.location.origin + window.location.pathname);
+          const scope = encodeURIComponent('https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/userinfo.email');
+          window.location.href = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId.trim()}&redirect_uri=${redirectUri}&response_type=token&scope=${scope}`;
+        }
       }
-    };
-  }
+    } catch (err: any) {
+      toast('⚠️ Error al conectar con Google OAuth.');
+    }
+  };
 
-  if (msBtn) {
-    msBtn.onclick = async () => {
-      try {
-        const { error } = await supabase.auth.signInWithOAuth({
-          provider: 'azure',
-          options: {
-            scopes: 'https://graph.microsoft.com/Mail.Read',
-            redirectTo: window.location.origin + window.location.pathname,
-          },
-        });
-        if (error) {
-          toast('⚠️ Microsoft OAuth no habilitado en Supabase.');
-          console.warn('OAuth Microsoft Error:', error.message);
-        }
-      } catch (err: any) {
-        toast('⚠️ Error al conectar con Microsoft OAuth.');
+  const triggerMicrosoftOAuth = async () => {
+    try {
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: 'azure',
+        options: {
+          scopes: 'https://graph.microsoft.com/Mail.Read',
+          redirectTo: window.location.origin + window.location.pathname,
+        },
+      });
+      if (error) {
+        toast('⚠️ Microsoft OAuth no habilitado en Supabase.');
+        console.warn('OAuth Microsoft Error:', error.message);
       }
-    };
-  }
+    } catch (err: any) {
+      toast('⚠️ Error al conectar con Microsoft OAuth.');
+    }
+  };
+
+  if (googleBtn) googleBtn.onclick = triggerGoogleOAuth;
+  if (settingsGoogleBtn) settingsGoogleBtn.onclick = triggerGoogleOAuth;
+  if (msBtn) msBtn.onclick = triggerMicrosoftOAuth;
+  if (settingsMsBtn) settingsMsBtn.onclick = triggerMicrosoftOAuth;
 
   const hideConnectModal = () => connectModal?.classList.remove('open');
 
@@ -1530,11 +1573,36 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   const nameInp = document.getElementById('newCategoryName') as HTMLInputElement;
   const colorInp = document.getElementById('newCategoryColor') as HTMLInputElement;
-  const addCat = () => {
+  const addCat = async () => {
     const name = nameInp.value.trim();
     if (!name) return;
-    categories.push({ id: uid('c'), name, color: colorInp.value || '#4c8bf5', keywords: [] });
+    if (categories.some((c) => c.name.toLowerCase() === name.toLowerCase())) {
+      toast(`⚠️ La categoría "${name}" ya existe.`);
+      return;
+    }
+    const color = colorInp.value || '#4c8bf5';
     nameInp.value = '';
+
+    if (currentUser) {
+      const { data: newDbCat, error } = await supabase.from('categories').insert({
+        user_id: currentUser.id,
+        name: name,
+        color: color,
+        keywords: [],
+      }).select().single();
+
+      if (error) {
+        toast(`⚠️ Error al crear categoría en la base de datos: ${error.message}`);
+        console.warn('Error al crear categoría:', error);
+        return;
+      }
+      if (newDbCat) {
+        categories.push({ id: newDbCat.id, name: newDbCat.name, color: newDbCat.color, keywords: newDbCat.keywords || [] });
+      }
+    } else {
+      categories.push({ id: uid('c'), name, color, keywords: [] });
+    }
+
     persist();
     renderCategoriesEditor();
     renderMails();
