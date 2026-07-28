@@ -87,21 +87,30 @@ async function fetchGoogleUserEmail(accessToken: string): Promise<string | null>
 
 async function handleDirectOAuthRedirect(): Promise<boolean> {
   const hash = window.location.hash || '';
-  if (!hash.includes('access_token=')) return false;
+  if (!hash.includes('access_token=') && !hash.includes('provider_token=')) return false;
 
   const params = new URLSearchParams(hash.replace(/^#/, ''));
+  const providerToken = params.get('provider_token');
   const accessToken = params.get('access_token');
-  if (!accessToken) return false;
 
-  (window as any).supabaseProviderToken = accessToken;
-  const userEmail = await fetchGoogleUserEmail(accessToken);
+  const tokenToUse = (providerToken && providerToken.startsWith('ya29'))
+    ? providerToken
+    : (accessToken && !accessToken.startsWith('eyJ'))
+      ? accessToken
+      : providerToken;
+
+  if (!tokenToUse) return false;
+
+  (window as any).supabaseProviderToken = tokenToUse;
+  const userEmail = await fetchGoogleUserEmail(tokenToUse);
 
   if (userEmail) {
     history.replaceState(null, '', window.location.pathname);
     const provider: EmailProvider = 'gmail';
     const accIndex = accounts.findIndex((a) => a.email.toLowerCase() === userEmail.toLowerCase());
     if (accIndex !== -1) {
-      accounts[accIndex].token = accessToken;
+      accounts[accIndex].token = tokenToUse;
+      accounts[accIndex].access_token = tokenToUse;
       accounts[accIndex].status = 'connected';
     } else {
       accounts.push({
@@ -109,12 +118,13 @@ async function handleDirectOAuthRedirect(): Promise<boolean> {
         primary: accounts.length === 0,
         provider,
         status: 'connected',
-        token: accessToken,
+        token: tokenToUse,
+        access_token: tokenToUse,
       });
     }
 
     activeAccount = userEmail.toLowerCase();
-    const count = await syncAccountInbox(userEmail, provider, accessToken);
+    const count = await syncAccountInbox(userEmail, provider, tokenToUse);
     persist();
     renderAccounts();
     renderMails();
@@ -133,8 +143,13 @@ async function syncSupabaseData(): Promise<void> {
     }
     currentUser = session.user;
 
-    const providerToken = session.provider_token || (window as any).supabaseProviderToken;
-    const authProvider = session.user.app_metadata?.provider;
+    const hashParams = new URLSearchParams((window.location.hash || '').replace(/^#/, ''));
+    const hashProviderToken = hashParams.get('provider_token');
+    const providerToken = session.provider_token || hashProviderToken || (window as any).supabaseProviderToken;
+
+    if (providerToken) {
+      (window as any).supabaseProviderToken = providerToken;
+    }
     const userEmail = (session.user.email || currentUser.email || '').toLowerCase().trim();
 
     // 1. Cargar o inicializar Perfil
@@ -160,13 +175,13 @@ async function syncSupabaseData(): Promise<void> {
     // 3. Cargar Cuentas del usuario guardadas en Supabase (con sus tokens OAuth)
     const { data: dbAccounts } = await supabase.from('user_accounts').select('*').eq('user_id', currentUser.id);
 
-    if (dbAccounts && dbAccounts.length > 0) {
+    if (dbAccounts !== null && dbAccounts.length > 0) {
       accounts = dbAccounts.map((a: any) => ({
         id: a.id,
         user_id: a.user_id,
-        email: a.email,
+        email: a.email.toLowerCase(),
         primary: a.is_primary,
-        provider: a.email.includes('gmail') ? 'gmail' : a.email.includes('outlook') ? 'outlook' : 'custom',
+        provider: a.email.toLowerCase().includes('gmail') ? 'gmail' : a.email.toLowerCase().includes('outlook') ? 'outlook' : 'custom',
         status: 'connected',
         access_token: a.access_token || undefined,
         refresh_token: a.refresh_token || undefined,
@@ -177,38 +192,73 @@ async function syncSupabaseData(): Promise<void> {
       accounts = store.get<Account[]>(KEYS.accounts, []).filter((a) => a.email && (a.provider === 'gmail' || a.provider === 'outlook'));
     }
 
-    const isOAuthGoogleOrAzure = authProvider === 'google' || authProvider === 'azure' || userEmail.endsWith('@gmail.com') || userEmail.endsWith('@outlook.com') || userEmail.endsWith('@hotmail.com');
+    // Asegurar que si el usuario inició sesión vía Google/Microsoft OAuth, su cuenta y token se registren y guarden en Supabase DB
+    if (userEmail && userEmail.includes('@')) {
+      const provider: EmailProvider = (userEmail.includes('outlook') || userEmail.includes('hotmail') || userEmail.includes('live')) ? 'outlook' : 'gmail';
+      const existingAcc = accounts.find((a) => a.email.toLowerCase() === userEmail);
 
-    if (isOAuthGoogleOrAzure && userEmail) {
-      const provider: EmailProvider = (authProvider === 'google' || userEmail.includes('gmail')) ? 'gmail' : 'outlook';
-      if (providerToken) {
-        (window as any).supabaseProviderToken = providerToken;
-      }
+      const effToken = providerToken || existingAcc?.access_token || existingAcc?.token;
 
-      const accIndex = accounts.findIndex((a) => a.email.toLowerCase() === userEmail);
-      if (accIndex !== -1) {
-        accounts[accIndex].provider = provider;
-        accounts[accIndex].status = 'connected';
-        if (providerToken) {
-          accounts[accIndex].access_token = providerToken;
-          accounts[accIndex].token = providerToken;
-        }
-      } else {
+      if (!existingAcc) {
         accounts.push({
           email: userEmail,
           primary: accounts.length === 0,
           provider,
           status: 'connected',
-          access_token: providerToken || undefined,
-          token: providerToken || undefined,
+          access_token: effToken,
+          token: effToken,
         });
+      } else if (effToken) {
+        existingAcc.access_token = effToken;
+        existingAcc.token = effToken;
+        existingAcc.status = 'connected';
       }
 
-      activeAccount = userEmail;
-      await syncAccountInbox(userEmail, provider, providerToken || undefined);
-    } else if (accounts.length > 0) {
+      if (effToken) {
+        // Guardar inmediatamente en la tabla user_accounts de Supabase DB
+        const { error: accErr } = await supabase.from('user_accounts').upsert({
+          user_id: currentUser.id,
+          email: userEmail,
+          access_token: effToken,
+          refresh_token: session.provider_refresh_token || null,
+          is_primary: true,
+        }, { onConflict: 'user_id,email' });
+
+        if (accErr) console.warn('Error al guardar/actualizar user_accounts en Supabase:', accErr);
+      }
+    }
+
+    // 4. Cargar Correos guardados en Supabase
+    const { data: dbMails } = await supabase.from('mails').select('*').eq('user_id', currentUser.id);
+    if (dbMails && dbMails.length > 0) {
+      const loadedMails: Mail[] = dbMails.map((m: any) => ({
+        id: m.id,
+        from: m.from_name || 'Remitente',
+        fromEmail: m.from_email || '',
+        to: m.to_address || '',
+        subject: m.subject || '(Sin asunto)',
+        body: m.body || '',
+        bodyHtml: m.body_html || undefined,
+        account: m.account,
+        folder: m.folder || 'inbox',
+        unread: Boolean(m.unread),
+        starred: Boolean(m.starred),
+        time: m.time_label || new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        scheduledFor: m.scheduled_for || null,
+      }));
+
+      const mailMap = new Map<string, Mail>();
+      loadedMails.forEach((m) => mailMap.set(m.id, m));
+      mails.forEach((m) => {
+        if (!mailMap.has(m.id)) mailMap.set(m.id, m);
+      });
+      mails = Array.from(mailMap.values());
+    }
+
+    // 5. Sincronizar bandejas para las cuentas de correo vinculadas en vivo
+    if (accounts.length > 0) {
       const validAccountEmails = new Set(accounts.map((a) => a.email.toLowerCase()));
-      mails = store.get<Mail[]>(KEYS.mails, []).filter((m) => m.account && validAccountEmails.has(m.account.toLowerCase()));
+      mails = mails.filter((m) => m.account && validAccountEmails.has(m.account.toLowerCase()));
 
       for (const acc of accounts) {
         const effToken = acc.access_token || acc.token || (window as any).supabaseProviderToken;
@@ -216,11 +266,6 @@ async function syncSupabaseData(): Promise<void> {
           await syncAccountInbox(acc.email, acc.provider, effToken);
         }
       }
-    } else {
-      accounts = [];
-      mails = [];
-      store.del(KEYS.accounts);
-      store.del(KEYS.mails);
     }
 
     persist();
@@ -325,17 +370,21 @@ async function syncAccountInbox(accountEmailRaw: string, forcedProvider?: EmailP
       provider,
       status: 'connected',
       token,
+      access_token: token,
       lastSync: nowTimeStr,
     });
   } else {
     accounts[accIndex].provider = provider;
     accounts[accIndex].status = 'connected';
     accounts[accIndex].lastSync = nowTimeStr;
-    if (token) accounts[accIndex].token = token;
+    if (token) {
+      accounts[accIndex].token = token;
+      accounts[accIndex].access_token = token;
+    }
   }
 
   const acc = accounts.find((a) => a.email.toLowerCase() === accountEmail);
-  const effectiveToken = token || acc?.token || (window as any).supabaseProviderToken;
+  const effectiveToken = token || acc?.access_token || acc?.token || (window as any).supabaseProviderToken;
   let liveMails: Mail[] = [];
 
   if (effectiveToken) {
@@ -494,17 +543,28 @@ function renderAccounts(): void {
           activeAccount = 'all';
         }
 
-        // 4. Delete from Supabase tables user_accounts & mails asynchronously
+        // 4. Delete from Supabase tables user_accounts & mails asynchronously and await completion
         if (currentUser) {
-          supabase.from('user_accounts').delete().eq('user_id', currentUser.id).eq('email', removedEmail).then(({ error }) => {
-            if (error) console.warn('Error al desvincular cuenta en Supabase:', error);
-          });
-          supabase.from('mails').delete().eq('user_id', currentUser.id).eq('account', removedEmail).then(({ error }) => {
-            if (error) console.warn('Error al eliminar correos de cuenta en Supabase:', error);
-          });
+          try {
+            const { error: accErr } = await supabase
+              .from('user_accounts')
+              .delete()
+              .eq('user_id', currentUser.id)
+              .ilike('email', removedEmail);
+            if (accErr) console.warn('Error al desvincular cuenta en Supabase:', accErr);
+
+            const { error: mailErr } = await supabase
+              .from('mails')
+              .delete()
+              .eq('user_id', currentUser.id)
+              .ilike('account', removedEmail);
+            if (mailErr) console.warn('Error al eliminar correos de cuenta en Supabase:', mailErr);
+          } catch (err) {
+            console.error('Excepción al eliminar cuenta de Supabase:', err);
+          }
         }
 
-        // 5. If no accounts remain, wipe localStorage keys completely
+        // 6. If no accounts remain, wipe localStorage keys completely
         if (!accounts.length) {
           accounts = [];
           mails = [];
@@ -512,7 +572,7 @@ function renderAccounts(): void {
           store.del(KEYS.mails);
         }
 
-        // 6. Persist and update UI
+        // 7. Persist and update UI
         persist();
         renderAccounts();
         renderMails();
@@ -1399,7 +1459,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   const connectModal = document.getElementById('connectProviderModal');
   const closeConnect = document.getElementById('closeConnectModal');
   const skipConnect = document.getElementById('skipConnectModal');
-  const confirmConnect = document.getElementById('confirmConnectModal');
   const googleBtn = document.getElementById('googleOAuthBtn');
   const msBtn = document.getElementById('microsoftOAuthBtn');
 
@@ -1427,7 +1486,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           }
         }
       } catch (err: any) {
-        toast('⚠️ Error al conectar con Google OAuth. Usa la opción manual de abajo.');
+        toast('⚠️ Error al conectar con Google OAuth.');
       }
     };
   }
@@ -1443,11 +1502,11 @@ document.addEventListener('DOMContentLoaded', async () => {
           },
         });
         if (error) {
-          toast('⚠️ Microsoft OAuth no habilitado en Supabase. Ingresa tu correo abajo.');
+          toast('⚠️ Microsoft OAuth no habilitado en Supabase.');
           console.warn('OAuth Microsoft Error:', error.message);
         }
       } catch (err: any) {
-        toast('⚠️ Microsoft OAuth no disponible. Ingresa tu correo abajo.');
+        toast('⚠️ Error al conectar con Microsoft OAuth.');
       }
     };
   }
@@ -1460,27 +1519,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     connectModal.addEventListener('click', (e) => {
       if (e.target === connectModal) hideConnectModal();
     });
-  }
-
-  if (confirmConnect) {
-    confirmConnect.onclick = async () => {
-      const emailInp = document.getElementById('modalAccountEmail') as HTMLInputElement;
-      const provSel = document.getElementById('modalAccountProvider') as HTMLSelectElement;
-      const tokenInp = document.getElementById('modalAccountToken') as HTMLInputElement;
-      const v = emailInp?.value.trim().toLowerCase();
-      if (!v || !v.includes('@')) return;
-      const provider = (provSel?.value || 'custom') as EmailProvider;
-      const token = tokenInp?.value.trim() || undefined;
-      emailInp.value = '';
-      if (tokenInp) tokenInp.value = '';
-      activeAccount = 'all';
-      const count = await syncAccountInbox(v, provider, token);
-      persist();
-      renderAccounts();
-      renderMails();
-      hideConnectModal();
-      toast(`${t('synced_success')} (${count} correos)`);
-    };
   }
 
   const hasGmailOrOutlook = accounts.some((a) => a.provider === 'gmail' || a.provider === 'outlook' || a.email.includes('gmail') || a.email.includes('outlook'));

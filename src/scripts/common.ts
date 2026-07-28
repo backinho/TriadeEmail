@@ -71,7 +71,7 @@ export const KEYS = {
 export type StorageKey = (typeof KEYS)[keyof typeof KEYS];
 
 export const store = {
-  get<T>(k: StorageKey, def: T): T {
+  get<T>(k: StorageKey | string, def: T): T {
     try {
       const v = localStorage.getItem(k);
       return v ? (JSON.parse(v) as T) : def;
@@ -79,10 +79,10 @@ export const store = {
       return def;
     }
   },
-  set(k: StorageKey, v: unknown): void {
+  set(k: StorageKey | string, v: unknown): void {
     localStorage.setItem(k, JSON.stringify(v));
   },
-  del(k: StorageKey): void {
+  del(k: StorageKey | string): void {
     localStorage.removeItem(k);
   },
 };

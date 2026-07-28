@@ -361,36 +361,11 @@ import BaseLayout from '../layouts/BaseLayout.astro';
       </button>
     </div>
 
-    <div class="modal-divider">
-      <span>o ingresa tu correo y Token API</span>
-    </div>
-
-    <div class="form-field">
-      <label data-i18n="select_provider">Proveedor</label>
-      <select id="modalAccountProvider" class="input">
-        <option value="gmail">Gmail (Google API REST)</option>
-        <option value="outlook">Outlook (Microsoft Graph API)</option>
-        <option value="custom">Otro correo</option>
-      </select>
-    </div>
-    <div class="form-field">
-      <label data-i18n="email">Correo electrónico real</label>
-      <input class="input" id="modalAccountEmail" placeholder="ejemplo@gmail.com / outlook.com" />
-    </div>
-    <div class="form-field">
-      <label style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.4rem;">
-        <span>Token de Acceso Google OAuth (Bearer Key ya29...)</span>
-        <a href="https://developers.google.com/oauthplayground/" target="_blank" rel="noopener" style="font-size:0.78rem; color:var(--accent); text-decoration:underline; font-weight:500;">Conseguir Token en OAuth Playground ↗</a>
-      </label>
-      <input class="input" id="modalAccountToken" type="text" placeholder="ya29.a0A... (Token Bearer con permiso gmail.readonly)" />
-      <span style="font-size:0.75rem; color:var(--fg-mute); margin-top:0.2rem;">
-        * Ingresa aquí tu Token `ya29...` de la API de Gmail para extraer inmediatamente tus correos en vivo.
-      </span>
-    </div>
     <div class="row-inline" style="justify-content: flex-end; gap: 0.6rem; margin-top: 1.25rem;">
       <button class="btn ghost" id="skipConnectModal" data-i18n="cancel">Omitir</button>
-      <button class="btn primary" id="confirmConnectModal" data-i18n="connect_sync">Conectar y Extraer Mails</button>
     </div>
+  </div>
+</div>
   </div>
 </div>
 </BaseLayout>
