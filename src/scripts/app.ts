@@ -155,6 +155,10 @@ async function handleDirectOAuthRedirect(): Promise<boolean> {
 
   if (userEmail) {
     history.replaceState(null, '', window.location.pathname);
+    // Remover de la lista de desvinculados explícitos si el usuario vuelve a vincular esta cuenta
+    const unlinked = store.get<string[]>('triade.unlinked', []).filter((e) => e.toLowerCase() !== userEmail!.toLowerCase());
+    store.set('triade.unlinked', unlinked);
+
     const provider: EmailProvider = userEmail.includes('outlook') || userEmail.includes('hotmail') || userEmail.includes('live') ? 'outlook' : 'gmail';
     const accIndex = accounts.findIndex((a) => a.email.toLowerCase() === userEmail!.toLowerCase());
     if (accIndex !== -1) {
@@ -263,33 +267,38 @@ async function syncSupabaseData(): Promise<void> {
 
       if (oauthEmail) {
         const cleanEmail = oauthEmail.toLowerCase().trim();
-        const provider: EmailProvider = (cleanEmail.includes('outlook') || cleanEmail.includes('hotmail') || cleanEmail.includes('live')) ? 'outlook' : 'gmail';
-        const existingAcc = accounts.find((a) => a.email.toLowerCase() === cleanEmail);
+        const unlinkedSet = new Set(store.get<string[]>('triade.unlinked', []));
 
-        if (!existingAcc) {
-          accounts.push({
+        // Solo restaurar la cuenta si NO fue desvinculada explícitamente por el usuario
+        if (!unlinkedSet.has(cleanEmail)) {
+          const provider: EmailProvider = (cleanEmail.includes('outlook') || cleanEmail.includes('hotmail') || cleanEmail.includes('live')) ? 'outlook' : 'gmail';
+          const existingAcc = accounts.find((a) => a.email.toLowerCase() === cleanEmail);
+
+          if (!existingAcc) {
+            accounts.push({
+              email: cleanEmail,
+              primary: accounts.length === 0,
+              provider,
+              status: 'connected',
+              access_token: providerToken,
+              token: providerToken,
+            });
+          } else {
+            existingAcc.access_token = providerToken;
+            existingAcc.token = providerToken;
+            existingAcc.status = 'connected';
+          }
+
+          const { error: accErr } = await supabase.from('user_accounts').upsert({
+            user_id: currentUser.id,
             email: cleanEmail,
-            primary: accounts.length === 0,
-            provider,
-            status: 'connected',
             access_token: providerToken,
-            token: providerToken,
-          });
-        } else {
-          existingAcc.access_token = providerToken;
-          existingAcc.token = providerToken;
-          existingAcc.status = 'connected';
+            refresh_token: session.provider_refresh_token || null,
+            is_primary: accounts.length === 1,
+          }, { onConflict: 'user_id,email' });
+
+          if (accErr) console.warn('Error al guardar/actualizar user_accounts en Supabase:', accErr);
         }
-
-        const { error: accErr } = await supabase.from('user_accounts').upsert({
-          user_id: currentUser.id,
-          email: cleanEmail,
-          access_token: providerToken,
-          refresh_token: session.provider_refresh_token || null,
-          is_primary: accounts.length === 1,
-        }, { onConflict: 'user_id,email' });
-
-        if (accErr) console.warn('Error al guardar/actualizar user_accounts en Supabase:', accErr);
       }
     }
 
@@ -582,32 +591,70 @@ function renderAccounts(): void {
         const index = +b.dataset.remove!;
         const removed = accounts[index];
         if (!removed) return;
-        const removedEmail = removed.email.toLowerCase();
+        const removedEmail = removed.email.toLowerCase().trim();
 
         if (!confirm(`¿Estás seguro de que deseas desvincular la cuenta ${removedEmail}?`)) {
           return;
         }
 
-        // 1. Remove account from local memory array
+        // 1. Eliminar de la lista de memoria
         accounts.splice(index, 1);
 
-        // 2. Remove all mails associated with this unlinked account from memory
+        // 2. Si la cuenta eliminada era primaria y aún quedan cuentas, asignar la primera restante como primaria
+        if (removed.primary && accounts.length > 0) {
+          accounts[0].primary = true;
+          if (profile.email.toLowerCase() === removedEmail) {
+            profile.email = accounts[0].email;
+          }
+        }
+
+        // 3. Eliminar los correos de memoria vinculados a esta cuenta
         mails = mails.filter((m) => m.account.toLowerCase() !== removedEmail);
 
-        // 3. Reset activeAccount filter if the unlinked account was selected
+        // 4. Reiniciar filtro activo si era la cuenta seleccionada
         if (activeAccount.toLowerCase() === removedEmail) {
           activeAccount = 'all';
         }
 
-        // 4. Delete from Supabase tables user_accounts asynchronously and await completion
+        // 5. Registrar en la lista de cuentas desvinculadas explícitamente y limpiar token global
+        const unlinked = store.get<string[]>('triade.unlinked', []);
+        if (!unlinked.includes(removedEmail)) {
+          unlinked.push(removedEmail);
+          store.set('triade.unlinked', unlinked);
+        }
+
+        if ((window as any).supabaseProviderToken && removed.access_token === (window as any).supabaseProviderToken) {
+          delete (window as any).supabaseProviderToken;
+        }
+
+        // 6. Eliminar registro en Supabase y actualizar nueva primaria si aplica
         if (currentUser) {
           try {
+            // Intentar borrar por ID (Primary Key) si está disponible
+            if (removed.id) {
+              const { error: idErr } = await supabase
+                .from('user_accounts')
+                .delete()
+                .eq('id', removed.id);
+              if (idErr) console.warn('Error al eliminar user_account por ID:', idErr.message);
+            }
+
+            // Borrado por coincidencia de user_id y correo (respaldo)
             const { error: accErr } = await supabase
               .from('user_accounts')
               .delete()
               .eq('user_id', currentUser.id)
-              .eq('email', removedEmail);
-            if (accErr) console.warn('Error al desvincular cuenta en Supabase user_accounts:', accErr);
+              .ilike('email', removedEmail);
+
+            if (accErr) console.warn('Error al desvincular cuenta en Supabase user_accounts:', accErr.message);
+
+            if (accounts.length > 0 && accounts[0]) {
+              await supabase
+                .from('user_accounts')
+                .update({ is_primary: true })
+                .eq('user_id', currentUser.id)
+                .ilike('email', accounts[0].email);
+            }
 
             // Intentar desvincular la identidad de Supabase Auth si fue enlazada
             if (currentUser.identities && Array.isArray(currentUser.identities)) {
@@ -623,7 +670,7 @@ function renderAccounts(): void {
           }
         }
 
-        // 6. If no accounts remain, wipe localStorage keys completely
+        // 7. Si no quedan cuentas, limpiar localStorage
         if (!accounts.length) {
           accounts = [];
           mails = [];
@@ -631,8 +678,9 @@ function renderAccounts(): void {
           store.del(KEYS.mails);
         }
 
-        // 7. Persist and update UI
+        // 8. Persistir y actualizar interfaz
         persist();
+        hydrateProfileForm();
         renderAccounts();
         renderMails();
         toast(`✔ Cuenta ${removedEmail} desvinculada exitosamente.`);
