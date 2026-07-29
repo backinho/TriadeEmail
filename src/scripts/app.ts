@@ -174,6 +174,9 @@ async function syncSupabaseData(): Promise<void> {
     }
     currentUser = session.user;
 
+    // Procesar primero cualquier vinculación directa por hash (#access_token=ya29...) para no alterar la sesión principal
+    await handleDirectOAuthRedirect();
+
     const hashParams = new URLSearchParams((window.location.hash || '').replace(/^#/, ''));
     const hashProviderToken = hashParams.get('provider_token');
     const providerToken = session.provider_token || hashProviderToken || (window as any).supabaseProviderToken;
@@ -182,18 +185,18 @@ async function syncSupabaseData(): Promise<void> {
       (window as any).supabaseProviderToken = providerToken;
     }
 
-    // 1. Cargar o inicializar Perfil
+    // 1. Cargar o inicializar Perfil (manteniendo siempre el correo principal de la sesión inicial)
     const { data: pData } = await supabase.from('profiles').select('*').eq('id', currentUser.id).single();
-    if (pData) {
+    if (pData && pData.email) {
       profile = {
         name: pData.name || currentUser.user_metadata?.full_name || 'Usuario Triade',
-        email: pData.email || session.user.email || '',
+        email: pData.email,
         phone: pData.phone || '',
         signature: pData.signature || '— Enviado desde Triade Mail',
       };
     } else {
-      profile.email = session.user.email || profile.email || '';
-      profile.name = currentUser.user_metadata?.full_name || profile.name || 'Usuario Triade';
+      profile.email = profile.email || session.user.email || currentUser.email || '';
+      profile.name = profile.name || currentUser.user_metadata?.full_name || 'Usuario Triade';
     }
 
     // 2. Cargar Categorías desde la tabla de Supabase DB
@@ -1493,25 +1496,23 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   const triggerGoogleOAuth = async () => {
     try {
-      const { error } = await supabase.auth.signInWithOAuth({
+      // 1. Usar supabase.auth.linkIdentity para vincular la identidad manteniendo la sesión actual de Supabase
+      // Esto utiliza la URL de callback de Supabase (https://fbvgznyuzwpfcscxxfvr.supabase.co/auth/v1/callback) ya autorizada en Google Cloud
+      const { error } = await supabase.auth.linkIdentity({
         provider: 'google',
         options: {
           scopes: 'https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/userinfo.email',
           redirectTo: window.location.origin + window.location.pathname,
         },
       });
+
       if (error) {
-        console.warn('Supabase OAuth Google Error:', error.message);
-        let clientId = (import.meta as any).env.PUBLIC_GOOGLE_CLIENT_ID || (window as any).PUBLIC_GOOGLE_CLIENT_ID;
-        if (!clientId) {
-          clientId = prompt('Ingresa tu Google Client ID para autenticar con Google OAuth:');
-        }
-        if (clientId) {
-          (window as any).PUBLIC_GOOGLE_CLIENT_ID = clientId.trim();
-          const redirectUri = encodeURIComponent(window.location.origin + window.location.pathname);
-          const scope = encodeURIComponent('https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/userinfo.email');
-          window.location.href = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId.trim()}&redirect_uri=${redirectUri}&response_type=token&scope=${scope}`;
-        }
+        console.warn('Supabase linkIdentity error:', error.message);
+        // Fallback a redirección directa con el client ID
+        let clientId = (import.meta as any).env.PUBLIC_GOOGLE_CLIENT_ID || (window as any).PUBLIC_GOOGLE_CLIENT_ID || '1053272205885-03ecg2aig51gds1f1va4h55n4j5t1l2l.apps.googleusercontent.com';
+        const redirectUri = encodeURIComponent(window.location.origin + window.location.pathname);
+        const scope = encodeURIComponent('https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/userinfo.email');
+        window.location.href = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId.trim()}&redirect_uri=${redirectUri}&response_type=token&scope=${scope}&prompt=select_account`;
       }
     } catch (err: any) {
       toast('⚠️ Error al conectar con Google OAuth.');
