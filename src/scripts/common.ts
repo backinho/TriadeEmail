@@ -42,6 +42,7 @@ export interface Mail {
   bodyHtml?: string;
   account: string;
   time: string;
+  timestamp?: number;
   unread: boolean;
   starred: boolean;
   folder: Folder;

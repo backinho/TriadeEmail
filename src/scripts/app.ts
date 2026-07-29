@@ -3,7 +3,7 @@ import {
   type Account, type Category, type Profile, type Mail, type Attachment, type Folder, type EmailProvider,
 } from './common';
 import { supabase } from './supabase';
-import { fetchRealGmailMails, fetchRealOutlookMails } from './emailApi';
+import { fetchRealGmailMails, fetchRealOutlookMails, sendRealGmailMail } from './emailApi';
 
 
 // ---------- Defaults ----------
@@ -282,6 +282,7 @@ async function syncSupabaseData(): Promise<void> {
         unread: Boolean(m.unread),
         starred: Boolean(m.starred),
         time: m.time_label || new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        timestamp: m.created_at ? new Date(m.created_at).getTime() : Date.now(),
         scheduledFor: m.scheduled_for || null,
       }));
 
@@ -356,9 +357,14 @@ function baseFiltered(): Mail[] {
 
 function tabFiltered(): Mail[] {
   const base = baseFiltered();
-  if (activeTab === 'all') return base;
-  if (activeTab === '__uncat') return base.filter((m) => classify(m.subject) === '__uncat');
-  return base.filter((m) => classify(m.subject) === activeTab);
+  const list = activeTab === 'all'
+    ? base
+    : activeTab === '__uncat'
+      ? base.filter((m) => classify(m.subject) === '__uncat')
+      : base.filter((m) => classify(m.subject) === activeTab);
+
+  // Ordenar SIEMPRE de más reciente a más antiguo
+  return list.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
 }
 
 function countMailsForTab(tabId: string): number {
@@ -441,22 +447,22 @@ async function syncAccountInbox(accountEmailRaw: string, forcedProvider?: EmailP
   }
 
   let addedCount = 0;
-  liveMails.forEach((newMail) => {
-    const exists = mails.some(
-      (m) => m.account.toLowerCase() === accountEmail && (m.id === newMail.id || m.subject.toLowerCase() === newMail.subject.toLowerCase())
-    );
-    if (!exists) {
-      mails.unshift(newMail);
-      addedCount++;
+  if (liveMails.length > 0) {
+    // Reemplazar correos antiguos/falsos de esta cuenta con los correos reales en vivo de la API
+    mails = mails.filter((m) => m.account.toLowerCase() !== accountEmail.toLowerCase());
+    mails.push(...liveMails);
+    addedCount = liveMails.length;
 
-      if (currentUser) {
-        supabase.from('mails').insert({
+    if (currentUser) {
+      for (const newMail of liveMails) {
+        supabase.from('mails').upsert({
           user_id: currentUser.id,
           from_name: newMail.from,
           from_email: newMail.fromEmail,
           to_address: newMail.to,
           subject: newMail.subject,
           body: newMail.body,
+          body_html: newMail.bodyHtml,
           account: newMail.account,
           folder: newMail.folder,
           unread: newMail.unread,
@@ -467,7 +473,10 @@ async function syncAccountInbox(accountEmailRaw: string, forcedProvider?: EmailP
         });
       }
     }
-  });
+  }
+
+  // Ordenar SIEMPRE la lista completa de correos de más reciente a más antiguo
+  mails.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
 
   if (currentUser) {
     supabase.from('user_accounts').upsert({
@@ -1025,7 +1034,7 @@ function readComposeFields(): { to: string; subject: string; bodyHtml: string; b
   };
 }
 
-function sendMail(): void {
+async function sendMail(): Promise<void> {
   const f = readComposeFields();
   if (!f.to) {
     document.getElementById('composeTo')!.focus();
@@ -1040,7 +1049,23 @@ function sendMail(): void {
     ? new Date(scheduledFor).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
     : `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
   const acct = accounts.find((a) => a.primary)?.email || accounts[0]?.email || profile.email;
-  mails.unshift({
+
+  const targetAcc = accounts.find((a) => a.email.toLowerCase() === acct.toLowerCase());
+  const effToken = targetAcc?.access_token || targetAcc?.token || (window as any).supabaseProviderToken;
+
+  if (targetAcc && targetAcc.provider === 'gmail' && effToken) {
+    toast('📤 Enviando correo en tiempo real por Gmail...');
+    const ok = await sendRealGmailMail(effToken, f.to, f.subject || '(Sin asunto)', f.bodyHtml || f.body);
+    if (ok) {
+      toast('✔ Correo enviado exitosamente vía Gmail API');
+    } else {
+      toast('⚠️ Error al enviar vía Gmail API. Guardado en carpeta Enviados.');
+    }
+  } else {
+    toast(scheduledFor ? t('mail_scheduled') : t('mail_sent'));
+  }
+
+  const newMailObj: Mail = {
     id: uid('m'),
     from: profile.name || acct,
     fromEmail: acct,
@@ -1051,13 +1076,35 @@ function sendMail(): void {
     attachments: composeAttachments.slice(),
     account: acct,
     time: timeStr,
+    timestamp: Date.now(),
     unread: false,
     starred: false,
     folder: 'sent',
     scheduledFor: scheduledFor || null,
-  });
+  };
+
+  mails.unshift(newMailObj);
+
+  if (currentUser) {
+    supabase.from('mails').insert({
+      user_id: currentUser.id,
+      from_name: newMailObj.from,
+      from_email: newMailObj.fromEmail,
+      to_address: newMailObj.to,
+      subject: newMailObj.subject,
+      body: newMailObj.body,
+      body_html: newMailObj.bodyHtml,
+      account: newMailObj.account,
+      folder: newMailObj.folder,
+      unread: false,
+      starred: false,
+      time_label: newMailObj.time,
+    }).then(({ error }) => {
+      if (error) console.warn('Error al guardar correo enviado en Supabase:', error);
+    });
+  }
+
   persist();
-  toast(scheduledFor ? t('mail_scheduled') : t('mail_sent'));
   closeCompose();
   renderMails();
 }
@@ -1485,6 +1532,23 @@ document.addEventListener('DOMContentLoaded', async () => {
       toast(`${t('synced_success')} (${totalSynced} nuevos)`);
     };
   }
+
+  // Sincronización automática periódica en tiempo real cada 30 segundos
+  setInterval(async () => {
+    if (accounts.length > 0) {
+      let totalSynced = 0;
+      for (const a of accounts) {
+        const effToken = a.access_token || a.token || (window as any).supabaseProviderToken;
+        if (effToken) {
+          totalSynced += await syncAccountInbox(a.email, a.provider, effToken);
+        }
+      }
+      if (totalSynced > 0) {
+        renderAccounts();
+        renderMails();
+      }
+    }
+  }, 30000);
 
   const connectModal = document.getElementById('connectProviderModal');
   const closeConnect = document.getElementById('closeConnectModal');

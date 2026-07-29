@@ -1,20 +1,95 @@
-import type { Mail, Folder, EmailProvider } from './common';
+import type { Mail, Folder } from './common';
 
 const uid = (p = 'm'): string =>
   p + '_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-3);
 
 /**
- * Extracts real live emails from Google Gmail API
- * Endpoint: https://gmail.googleapis.com/gmail/v1/users/me/messages
+ * Recurse through Gmail payload parts to extract body text and html
  */
+function extractGmailBody(payload: any): { text: string; html: string } {
+  let text = '';
+  let html = '';
+
+  if (!payload) return { text, html };
+
+  if (payload.body?.data) {
+    try {
+      const decoded = atob(payload.body.data.replace(/-/g, '+').replace(/_/g, '/'));
+      if (payload.mimeType === 'text/html') {
+        html = decoded;
+      } else {
+        text = decoded;
+      }
+    } catch {
+      // Ignore decoding errors
+    }
+  }
+
+  if (payload.parts && Array.isArray(payload.parts)) {
+    for (const part of payload.parts) {
+      const res = extractGmailBody(part);
+      if (res.html && !html) html = res.html;
+      if (res.text && !text) text = res.text;
+    }
+  }
+
+  return { text, html };
+}
+
 /**
- * Extracts real live emails from Google Gmail API
+ * Send email in real-time via Google Gmail API
+ * Endpoint: POST https://gmail.googleapis.com/upload/gmail/v1/users/me/messages/send
+ */
+export async function sendRealGmailMail(
+  accessToken: string,
+  to: string,
+  subject: string,
+  bodyHtmlOrText: string
+): Promise<boolean> {
+  try {
+    const rawMessage = [
+      `To: ${to}`,
+      `Subject: ${subject}`,
+      'Content-Type: text/html; charset=utf-8',
+      'MIME-Version: 1.0',
+      '',
+      bodyHtmlOrText,
+    ].join('\r\n');
+
+    const encodedMessage = btoa(unescape(encodeURIComponent(rawMessage)))
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
+
+    const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ raw: encodedMessage }),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      console.warn('Gmail API Send error:', res.status, errText);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error('sendRealGmailMail exception:', err);
+    return false;
+  }
+}
+
+/**
+ * Extracts real live emails from Google Gmail API (Inbox, Sent, Drafts, Spam, Trash)
  * Endpoint: https://gmail.googleapis.com/gmail/v1/users/me/messages
  */
 export async function fetchRealGmailMails(accessToken: string, accountEmail: string): Promise<Mail[]> {
   try {
     const listRes = await fetch(
-      'https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=20',
+      'https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=50',
       {
         headers: { Authorization: `Bearer ${accessToken}` },
       }
@@ -33,8 +108,8 @@ export async function fetchRealGmailMails(accessToken: string, accountEmail: str
 
     const fetchedMails: Mail[] = [];
 
-    // Fetch detail for top 20 messages
-    for (const item of messageSummaries.slice(0, 20)) {
+    // Fetch detail for messages
+    for (const item of messageSummaries.slice(0, 50)) {
       try {
         const detailRes = await fetch(
           `https://gmail.googleapis.com/gmail/v1/users/me/messages/${item.id}?format=full`,
@@ -49,56 +124,78 @@ export async function fetchRealGmailMails(accessToken: string, accountEmail: str
 
         const subjectHeader = headers.find((h) => h.name.toLowerCase() === 'subject');
         const fromHeader = headers.find((h) => h.name.toLowerCase() === 'from');
+        const toHeader = headers.find((h) => h.name.toLowerCase() === 'to');
         const dateHeader = headers.find((h) => h.name.toLowerCase() === 'date');
 
         const rawFrom = fromHeader?.value || 'Remitente';
+        const rawTo = toHeader?.value || accountEmail;
         const subject = subjectHeader?.value || '(Sin asunto)';
         const snippet = msg.snippet || '';
 
         let senderName = rawFrom;
         let senderEmail = rawFrom;
-        const match = rawFrom.match(/^(?:"?([^"]*)"?\s)?<([^>]+)>$/);
-        if (match) {
-          senderName = match[1] || match[2];
-          senderEmail = match[2];
+        const matchFrom = rawFrom.match(/^(?:"?([^"]*)"?\s)?<([^>]+)>$/);
+        if (matchFrom) {
+          senderName = matchFrom[1] || matchFrom[2];
+          senderEmail = matchFrom[2];
         }
 
-        const dateObj = dateHeader ? new Date(dateHeader.value) : new Date();
+        let toEmail = rawTo;
+        const matchTo = rawTo.match(/^(?:"?([^"]*)"?\s)?<([^>]+)>$/);
+        if (matchTo) {
+          toEmail = matchTo[2];
+        }
+
+        const internalTs = Number(msg.internalDate) || (dateHeader ? new Date(dateHeader.value).getTime() : Date.now());
+        const dateObj = new Date(internalTs);
+        const isToday = dateObj.toDateString() === new Date().toDateString();
         const timeLabel = isNaN(dateObj.getTime())
           ? new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-          : dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          : isToday
+            ? dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+            : dateObj.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ', ' + dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-        const isUnread = Boolean(msg.labelIds?.includes('UNREAD'));
-        const isStarred = Boolean(msg.labelIds?.includes('STARRED'));
+        const labelIds: string[] = msg.labelIds || [];
+        const isUnread = labelIds.includes('UNREAD');
+        const isStarred = labelIds.includes('STARRED');
 
-        let bodyContent = snippet;
-        if (msg.payload?.body?.data) {
-          try {
-            bodyContent = atob(msg.payload.body.data.replace(/-/g, '+').replace(/_/g, '/'));
-          } catch {
-            bodyContent = snippet;
-          }
+        let folder: Folder = 'inbox';
+        if (labelIds.includes('SENT')) {
+          folder = 'sent';
+        } else if (labelIds.includes('DRAFT')) {
+          folder = 'drafts';
+        } else if (labelIds.includes('SPAM')) {
+          folder = 'spam';
+        } else if (labelIds.includes('TRASH')) {
+          folder = 'trash';
         }
+
+        const { text: bodyText, html: bodyHtml } = extractGmailBody(msg.payload);
+        const finalBodyText = bodyText || snippet || '(Sin contenido)';
+        const finalBodyHtml = bodyHtml || undefined;
 
         fetchedMails.push({
           id: item.id || uid('m'),
           from: senderName,
           fromEmail: senderEmail,
-          to: accountEmail,
+          to: toEmail,
           subject: subject,
-          body: bodyContent || snippet || '(Sin contenido)',
+          body: finalBodyText,
+          bodyHtml: finalBodyHtml,
           account: accountEmail,
           time: timeLabel,
+          timestamp: internalTs,
           unread: isUnread,
           starred: isStarred,
-          folder: 'inbox',
+          folder: folder,
         });
       } catch (err) {
         console.warn(`Failed to parse Gmail message ${item.id}:`, err);
       }
     }
 
-    return fetchedMails;
+    // Ordenar siempre de más reciente a más antiguo (timestamp descendente)
+    return fetchedMails.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
   } catch (err) {
     console.error('fetchRealGmailMails error:', err);
     throw err;
@@ -107,12 +204,12 @@ export async function fetchRealGmailMails(accessToken: string, accountEmail: str
 
 /**
  * Extracts real live emails from Microsoft Graph API (Outlook)
- * Endpoint: https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages
+ * Endpoint: https://graph.microsoft.com/v1.0/me/messages
  */
 export async function fetchRealOutlookMails(accessToken: string, accountEmail: string): Promise<Mail[]> {
   try {
     const res = await fetch(
-      'https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$top=20&$select=id,subject,bodyPreview,body,from,receivedDateTime,isRead,flag',
+      'https://graph.microsoft.com/v1.0/me/messages?$top=50&$select=id,subject,bodyPreview,body,from,toRecipients,receivedDateTime,sentDateTime,isRead,flag',
       {
         headers: { Authorization: `Bearer ${accessToken}` },
       }
@@ -130,27 +227,35 @@ export async function fetchRealOutlookMails(accessToken: string, accountEmail: s
     const fetchedMails: Mail[] = items.map((m: any) => {
       const senderName = m.from?.emailAddress?.name || m.from?.emailAddress?.address || 'Outlook User';
       const senderEmail = m.from?.emailAddress?.address || '';
-      const dateObj = m.receivedDateTime ? new Date(m.receivedDateTime) : new Date();
+      const toAddress = m.toRecipients?.[0]?.emailAddress?.address || accountEmail;
+      const dateObj = m.receivedDateTime ? new Date(m.receivedDateTime) : (m.sentDateTime ? new Date(m.sentDateTime) : new Date());
       const timeLabel = isNaN(dateObj.getTime())
         ? new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-        : dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        : dateObj.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+      const isSent = senderEmail.toLowerCase() === accountEmail.toLowerCase();
+
+      const timestampNum = !isNaN(dateObj.getTime()) ? dateObj.getTime() : Date.now();
 
       return {
-        id: uid('m'),
+        id: m.id || uid('m'),
         from: senderName,
         fromEmail: senderEmail,
-        to: accountEmail,
+        to: toAddress,
         subject: m.subject || '(Sin asunto)',
         body: m.bodyPreview || (m.body?.content ? m.body.content.replace(/<[^>]+>/g, '').slice(0, 200) : ''),
+        bodyHtml: m.body?.contentType === 'html' ? m.body.content : undefined,
         account: accountEmail,
         time: timeLabel,
+        timestamp: timestampNum,
         unread: !m.isRead,
         starred: m.flag?.flagStatus === 'flagged',
-        folder: 'inbox' as Folder,
+        folder: isSent ? ('sent' as Folder) : ('inbox' as Folder),
       };
     });
 
-    return fetchedMails;
+    // Ordenar de más reciente a más antiguo (timestamp descendente)
+    return fetchedMails.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
   } catch (err) {
     console.error('fetchRealOutlookMails error:', err);
     throw err;
