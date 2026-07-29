@@ -81,10 +81,18 @@ export const store = {
     }
   },
   set(k: StorageKey | string, v: unknown): void {
-    localStorage.setItem(k, JSON.stringify(v));
+    try {
+      localStorage.setItem(k, JSON.stringify(v));
+    } catch (err) {
+      console.warn(`[Storage] No se pudo guardar '${k}' en localStorage (cuota excedida o almacenamiento bloqueado):`, err);
+    }
   },
   del(k: StorageKey | string): void {
-    localStorage.removeItem(k);
+    try {
+      localStorage.removeItem(k);
+    } catch {
+      // Ignore
+    }
   },
 };
 

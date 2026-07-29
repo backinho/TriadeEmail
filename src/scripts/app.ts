@@ -49,7 +49,23 @@ const persist = (): void => {
   store.set(KEYS.categories, categories);
   store.set(KEYS.profile, profile);
   store.set(KEYS.pageSize, pageSize);
-  store.set(KEYS.mails, mails);
+
+  // Guardar un resumen ligero de los 30 correos más recientes en localStorage para no exceder los 5MB del navegador
+  const lightMails = mails.slice(0, 30).map((m) => ({
+    id: m.id,
+    from: m.from,
+    fromEmail: m.fromEmail,
+    to: m.to,
+    subject: m.subject,
+    body: (m.body || '').slice(0, 180),
+    account: m.account,
+    time: m.time,
+    timestamp: m.timestamp,
+    unread: m.unread,
+    starred: m.starred,
+    folder: m.folder,
+  }));
+  store.set(KEYS.mails, lightMails);
 
   if (currentUser) {
     supabase.from('profiles').upsert({
@@ -60,7 +76,18 @@ const persist = (): void => {
       signature: profile.signature,
       page_size: pageSize,
     }).then(({ error }) => {
-      if (error) console.warn('Error al actualizar perfil en Supabase:', error);
+      if (error) {
+        // Fallback: Si RLS en Supabase no tiene política de INSERT habilitada, actualizar por id
+        supabase.from('profiles').update({
+          name: profile.name,
+          email: profile.email,
+          phone: profile.phone,
+          signature: profile.signature,
+          page_size: pageSize,
+        }).eq('id', currentUser.id).then(({ error: updateErr }) => {
+          if (updateErr) console.warn('Error al actualizar perfil en Supabase:', updateErr);
+        });
+      }
     });
 
     for (const cat of categories) {
@@ -267,7 +294,10 @@ async function syncSupabaseData(): Promise<void> {
     }
 
     // 4. Cargar Correos guardados en Supabase
-    const { data: dbMails } = await supabase.from('mails').select('*').eq('user_id', currentUser.id);
+    const { data: dbMails, error: mailSelectErr } = await supabase.from('mails').select('*').eq('user_id', currentUser.id);
+    if (mailSelectErr) {
+      console.warn('Nota: La consulta a la tabla "mails" en Supabase devolvió un error (ej: RLS o tipo de columna id):', mailSelectErr.message);
+    }
     if (dbMails && dbMails.length > 0) {
       const loadedMails: Mail[] = dbMails.map((m: any) => ({
         id: m.id,
@@ -448,31 +478,10 @@ async function syncAccountInbox(accountEmailRaw: string, forcedProvider?: EmailP
 
   let addedCount = 0;
   if (liveMails.length > 0) {
-    // Reemplazar correos antiguos/falsos de esta cuenta con los correos reales en vivo de la API
+    // Reemplazar correos antiguos de esta cuenta con los correos reales en vivo extraídos de la API (solo en memoria)
     mails = mails.filter((m) => m.account.toLowerCase() !== accountEmail.toLowerCase());
     mails.push(...liveMails);
     addedCount = liveMails.length;
-
-    if (currentUser) {
-      for (const newMail of liveMails) {
-        supabase.from('mails').upsert({
-          user_id: currentUser.id,
-          from_name: newMail.from,
-          from_email: newMail.fromEmail,
-          to_address: newMail.to,
-          subject: newMail.subject,
-          body: newMail.body,
-          body_html: newMail.bodyHtml,
-          account: newMail.account,
-          folder: newMail.folder,
-          unread: newMail.unread,
-          starred: newMail.starred,
-          time_label: newMail.time,
-        }).then(({ error }) => {
-          if (error) console.warn('Error al guardar correo en Supabase:', error);
-        });
-      }
-    }
   }
 
   // Ordenar SIEMPRE la lista completa de correos de más reciente a más antiguo
@@ -590,22 +599,25 @@ function renderAccounts(): void {
           activeAccount = 'all';
         }
 
-        // 4. Delete from Supabase tables user_accounts & mails asynchronously and await completion
+        // 4. Delete from Supabase tables user_accounts asynchronously and await completion
         if (currentUser) {
           try {
             const { error: accErr } = await supabase
               .from('user_accounts')
               .delete()
               .eq('user_id', currentUser.id)
-              .ilike('email', removedEmail);
-            if (accErr) console.warn('Error al desvincular cuenta en Supabase:', accErr);
+              .eq('email', removedEmail);
+            if (accErr) console.warn('Error al desvincular cuenta en Supabase user_accounts:', accErr);
 
-            const { error: mailErr } = await supabase
-              .from('mails')
-              .delete()
-              .eq('user_id', currentUser.id)
-              .ilike('account', removedEmail);
-            if (mailErr) console.warn('Error al eliminar correos de cuenta en Supabase:', mailErr);
+            // Intentar desvincular la identidad de Supabase Auth si fue enlazada
+            if (currentUser.identities && Array.isArray(currentUser.identities)) {
+              const matchingIdentity = currentUser.identities.find(
+                (id: any) => id.identity_data?.email?.toLowerCase() === removedEmail || id.email?.toLowerCase() === removedEmail
+              );
+              if (matchingIdentity) {
+                await supabase.auth.unlinkIdentity(matchingIdentity);
+              }
+            }
           } catch (err) {
             console.error('Excepción al eliminar cuenta de Supabase:', err);
           }
