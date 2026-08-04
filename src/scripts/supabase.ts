@@ -10,6 +10,9 @@ const anonKey =
   (import.meta.env.VITE_SUPABASE_ANON_KEY as string) ||
   'sb_publishable_V8UYsBCqZJqEtjYV0xKeKg_9y9yOUQt';
 
+export const supabaseUrl = url;
+export const supabaseAnonKey = anonKey;
+
 export const supabase = createClient(url, anonKey, {
   auth: {
     persistSession: true,

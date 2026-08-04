@@ -2,8 +2,8 @@ import {
   KEYS, store, t, applyTheme, applyI18n,
   type Account, type Category, type Profile, type Mail, type Attachment, type Folder, type EmailProvider,
 } from './common';
-import { supabase } from './supabase';
-import { fetchRealGmailMails, fetchRealOutlookMails, sendRealGmailMail } from './emailApi';
+import { supabase, supabaseUrl, supabaseAnonKey } from './supabase';
+import { fetchRealGmailMails, fetchRealOutlookMails, sendRealGmailMail, sendRealOutlookMail, type SendResult } from './emailApi';
 
 
 // ---------- Defaults ----------
@@ -16,11 +16,48 @@ const DEFAULT_PROFILE: Profile = {
   signature: '— Enviado desde Triade Mail',
 };
 
+const GOOGLE_OAUTH_SCOPES = [
+  'https://www.googleapis.com/auth/gmail.readonly',
+  'https://www.googleapis.com/auth/gmail.send',
+  'https://www.googleapis.com/auth/userinfo.email',
+].join(' ');
+
+const MICROSOFT_OAUTH_SCOPES = [
+  'https://graph.microsoft.com/Mail.Read',
+  'https://graph.microsoft.com/Mail.Send',
+  'https://graph.microsoft.com/User.Read',
+].join(' ');
+
 const uid = (p = 'm'): string =>
   p + '_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-3);
 
 // ---------- State ----------
-let accounts: Account[] = store.get<Account[]>(KEYS.accounts, []).filter((a) => a.provider === 'gmail' || a.provider === 'outlook');
+function loadSessionAccounts(): Account[] {
+  try {
+    const raw = sessionStorage.getItem(KEYS.sessionAccounts);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as Account[];
+    return parsed.filter((a) => a.provider === 'gmail' || a.provider === 'outlook');
+  } catch {
+    return [];
+  }
+}
+
+function saveSessionAccounts(accs: Account[]): void {
+  try {
+    const sanitized = accs.map(({ id, user_id, email, primary, provider, status, lastSync, access_token, refresh_token, expires_at, token }) => ({
+      id, user_id, email, primary, provider, status, lastSync, access_token, refresh_token, expires_at, token,
+    }));
+    sessionStorage.setItem(KEYS.sessionAccounts, JSON.stringify(sanitized));
+  } catch (err) {
+    console.warn('No se pudo guardar cuentas en sessionStorage:', err);
+  }
+}
+
+let accounts: Account[] = loadSessionAccounts();
+if (accounts.length === 0) {
+  accounts = store.get<Account[]>(KEYS.accounts, []).filter((a) => a.provider === 'gmail' || a.provider === 'outlook');
+}
 let categories: Category[] = store.get<Category[]>(KEYS.categories, DEFAULT_CATEGORIES);
 let profile: Profile = store.get<Profile>(KEYS.profile, DEFAULT_PROFILE);
 let pageSize: number = store.get<number>(KEYS.pageSize, 10);
@@ -43,9 +80,17 @@ let searchQuery = '';
 let currentPage = 1;
 
 let currentUser: any = null;
+let cachedAuthToken: string | null = null;
+let composeFromAccount: string = '';
 
 const persist = (): void => {
-  store.set(KEYS.accounts, accounts);
+  saveSessionAccounts(accounts);
+  store.set(KEYS.accounts, accounts.map(({ access_token, refresh_token, token, ...rest }) => ({
+    ...rest,
+    access_token: undefined,
+    refresh_token: undefined,
+    token: undefined,
+  })));
   store.set(KEYS.categories, categories);
   store.set(KEYS.profile, profile);
   store.set(KEYS.pageSize, pageSize);
@@ -103,6 +148,209 @@ const persist = (): void => {
   }
 };
 
+function showPendingUnlinkNotices(): void {
+  const notice = store.get<{ emails: string[]; at: number } | null>(KEYS.unlinkNotice, null);
+  if (!notice?.emails?.length) return;
+  store.del(KEYS.unlinkNotice);
+  const emails = notice.emails.join(', ');
+  if (notice.emails.length === 1) {
+    toast(`ℹ️ ${t('account_unlinked_on_close').replace('{email}', notice.emails[0])}`);
+  } else {
+    toast(`ℹ️ ${t('accounts_unlinked_on_close').replace('{emails}', emails)}`);
+  }
+}
+
+async function restoreAccountsToDb(): Promise<void> {
+  if (!currentUser || accounts.length === 0) return;
+  for (const acc of accounts) {
+    const effToken = acc.access_token || acc.token;
+    await supabase.from('user_accounts').upsert({
+      user_id: currentUser.id,
+      email: acc.email.toLowerCase(),
+      access_token: effToken || null,
+      refresh_token: acc.refresh_token || null,
+      expires_at: acc.expires_at || null,
+      is_primary: acc.primary || false,
+    }, { onConflict: 'user_id,email' });
+  }
+}
+
+function deleteAccountsFromDbKeepalive(userId: string, authToken: string, emails: string[]): void {
+  for (const email of emails) {
+    const url = `${supabaseUrl}/rest/v1/user_accounts?user_id=eq.${encodeURIComponent(userId)}&email=eq.${encodeURIComponent(email.toLowerCase())}`;
+    fetch(url, {
+      method: 'DELETE',
+      headers: {
+        apikey: supabaseAnonKey,
+        Authorization: `Bearer ${authToken}`,
+        Prefer: 'return=minimal',
+      },
+      keepalive: true,
+    }).catch(() => {});
+  }
+}
+
+async function unlinkAccountByEmail(
+  removedEmail: string,
+  options: { silent?: boolean; skipConfirm?: boolean; fromBrowserClose?: boolean } = {}
+): Promise<boolean> {
+  const emailLower = removedEmail.toLowerCase().trim();
+  const index = accounts.findIndex((a) => a.email.toLowerCase() === emailLower);
+  if (index === -1) return false;
+
+  if (!options.skipConfirm && !options.fromBrowserClose) {
+    const confirmed = await showConfirm({
+      title: t('remove'),
+      message: t('confirm_unlink').replace('{email}', emailLower),
+      confirmText: t('remove'),
+      danger: true,
+    });
+    if (!confirmed) return false;
+  }
+
+  const removed = accounts[index];
+  accounts.splice(index, 1);
+
+  if (removed.primary && accounts.length > 0) {
+    accounts[0].primary = true;
+    if (profile.email.toLowerCase() === emailLower) {
+      profile.email = accounts[0].email;
+    }
+  }
+
+  mails = mails.filter((m) => m.account.toLowerCase() !== emailLower);
+
+  if (activeAccount.toLowerCase() === emailLower) {
+    activeAccount = 'all';
+  }
+
+  const unlinked = store.get<string[]>(KEYS.unlinked, []);
+  if (!unlinked.includes(emailLower)) {
+    unlinked.push(emailLower);
+    store.set(KEYS.unlinked, unlinked);
+  }
+
+  if ((window as any).supabaseProviderToken && removed.access_token === (window as any).supabaseProviderToken) {
+    delete (window as any).supabaseProviderToken;
+  }
+
+  removed.access_token = undefined;
+  removed.refresh_token = undefined;
+  removed.token = undefined;
+  removed.status = undefined;
+
+  if (currentUser) {
+    try {
+      if (removed.id) {
+        await supabase.from('user_accounts').delete().eq('id', removed.id);
+      }
+      await supabase
+        .from('user_accounts')
+        .delete()
+        .eq('user_id', currentUser.id)
+        .ilike('email', emailLower);
+
+      if (accounts.length > 0 && accounts[0]) {
+        await supabase
+          .from('user_accounts')
+          .update({ is_primary: true })
+          .eq('user_id', currentUser.id)
+          .ilike('email', accounts[0].email);
+      }
+
+      if (!options.fromBrowserClose && currentUser.identities && Array.isArray(currentUser.identities)) {
+        const matchingIdentity = currentUser.identities.find(
+          (id: any) => id.identity_data?.email?.toLowerCase() === emailLower || id.email?.toLowerCase() === emailLower
+        );
+        if (matchingIdentity) {
+          await supabase.auth.unlinkIdentity(matchingIdentity);
+        }
+      }
+    } catch (err) {
+      console.error('Excepción al eliminar cuenta de Supabase:', err);
+    }
+  }
+
+  if (!accounts.length) {
+    accounts = [];
+    mails = [];
+    store.del(KEYS.accounts);
+    store.del(KEYS.mails);
+    sessionStorage.removeItem(KEYS.sessionAccounts);
+  }
+
+  persist();
+  if (!options.fromBrowserClose) {
+    hydrateProfileForm();
+    renderAccounts();
+    renderMails();
+    populateComposeFromSelect();
+    if (!options.silent) {
+      toast(`✔ ${t('account_unlinked').replace('{email}', emailLower)}`);
+    }
+  }
+
+  return true;
+}
+
+function unlinkAllAccountsOnBrowserClose(): void {
+  if (accounts.length === 0 || !currentUser || !cachedAuthToken) return;
+
+  const emailsToUnlink = accounts.map((a) => a.email.toLowerCase());
+  deleteAccountsFromDbKeepalive(currentUser.id, cachedAuthToken, emailsToUnlink);
+
+  store.set(KEYS.unlinkNotice, { emails: emailsToUnlink, at: Date.now() });
+
+  for (const email of [...emailsToUnlink]) {
+    const unlinked = store.get<string[]>(KEYS.unlinked, []);
+    if (!unlinked.includes(email)) {
+      unlinked.push(email);
+      store.set(KEYS.unlinked, unlinked);
+    }
+  }
+
+  delete (window as any).supabaseProviderToken;
+
+  // Invalidar tokens en memoria; sessionStorage se limpia solo al cerrar el navegador
+  accounts.forEach((a) => {
+    a.access_token = undefined;
+    a.refresh_token = undefined;
+    a.token = undefined;
+  });
+  store.del(KEYS.accounts);
+}
+
+function inferProvider(email: string, token?: string): EmailProvider {
+  if (token?.startsWith('ya29')) return 'gmail';
+  const lower = email.toLowerCase();
+  if (lower.includes('outlook') || lower.includes('hotmail') || lower.includes('live') || lower.includes('onmicrosoft.com')) {
+    return 'outlook';
+  }
+  if (lower.includes('gmail') || lower.includes('googlemail')) return 'gmail';
+  return 'custom';
+}
+
+async function resolveSendToken(acc: Account): Promise<string | null> {
+  const { data: { session } } = await supabase.auth.getSession();
+  if (session?.access_token) cachedAuthToken = session.access_token;
+
+  const candidates: string[] = [];
+  if (session?.provider_token && !session.provider_token.startsWith('eyJ')) {
+    candidates.push(session.provider_token);
+  }
+  if (acc.access_token) candidates.push(acc.access_token);
+  if (acc.token) candidates.push(acc.token);
+  const globalToken = (window as any).supabaseProviderToken;
+  if (globalToken) candidates.push(globalToken);
+
+  for (const token of candidates) {
+    if (!token || token.startsWith('eyJ')) continue;
+    if (acc.provider === 'gmail' && token.startsWith('ya29')) return token;
+    if (acc.provider === 'outlook') return token;
+  }
+  return null;
+}
+
 async function fetchGoogleUserEmail(accessToken: string): Promise<string | null> {
   try {
     const res = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
@@ -156,8 +404,8 @@ async function handleDirectOAuthRedirect(): Promise<boolean> {
   if (userEmail) {
     history.replaceState(null, '', window.location.pathname);
     // Remover de la lista de desvinculados explícitos si el usuario vuelve a vincular esta cuenta
-    const unlinked = store.get<string[]>('triade.unlinked', []).filter((e) => e.toLowerCase() !== userEmail!.toLowerCase());
-    store.set('triade.unlinked', unlinked);
+    const unlinked = store.get<string[]>(KEYS.unlinked, []).filter((e) => e.toLowerCase() !== userEmail!.toLowerCase());
+    store.set(KEYS.unlinked, unlinked);
 
     const provider: EmailProvider = userEmail.includes('outlook') || userEmail.includes('hotmail') || userEmail.includes('live') ? 'outlook' : 'gmail';
     const accIndex = accounts.findIndex((a) => a.email.toLowerCase() === userEmail!.toLowerCase());
@@ -204,6 +452,13 @@ async function syncSupabaseData(): Promise<void> {
       return;
     }
     currentUser = session.user;
+    cachedAuthToken = session.access_token;
+
+    const wasRecentReload = (() => {
+      const unloadTime = sessionStorage.getItem('triade.unloadTime');
+      sessionStorage.removeItem('triade.unloadTime');
+      return unloadTime ? Date.now() - parseInt(unloadTime, 10) < 8000 : false;
+    })();
 
     // Procesar primero cualquier vinculación directa por hash (#access_token=ya29...) para no alterar la sesión principal
     await handleDirectOAuthRedirect();
@@ -242,19 +497,36 @@ async function syncSupabaseData(): Promise<void> {
     const { data: dbAccounts } = await supabase.from('user_accounts').select('*').eq('user_id', currentUser.id);
 
     if (dbAccounts !== null && dbAccounts.length > 0) {
-      accounts = dbAccounts.map((a: any) => ({
+      const dbMapped = dbAccounts.map((a: any) => ({
         id: a.id,
         user_id: a.user_id,
         email: a.email.toLowerCase(),
         primary: a.is_primary,
-        provider: a.email.toLowerCase().includes('gmail') ? 'gmail' : a.email.toLowerCase().includes('outlook') ? 'outlook' : 'custom',
-        status: 'connected',
+        provider: a.email.toLowerCase().includes('gmail') ? 'gmail' as EmailProvider : a.email.toLowerCase().includes('outlook') ? 'outlook' as EmailProvider : 'custom' as EmailProvider,
+        status: 'connected' as const,
         access_token: a.access_token || undefined,
         refresh_token: a.refresh_token || undefined,
         expires_at: a.expires_at || undefined,
         token: a.access_token || undefined,
       }));
-    } else {
+
+      // Preferir tokens de sessionStorage (sesión activa) sobre los de la DB
+      const sessionMap = new Map(accounts.map((a) => [a.email.toLowerCase(), a]));
+      accounts = dbMapped.map((dbAcc) => {
+        const sessionAcc = sessionMap.get(dbAcc.email.toLowerCase());
+        if (sessionAcc?.access_token || sessionAcc?.token) {
+          return { ...dbAcc, access_token: sessionAcc.access_token || sessionAcc.token, token: sessionAcc.token || sessionAcc.access_token };
+        }
+        return dbAcc;
+      });
+
+      // Añadir cuentas solo en sessionStorage que aún no están en DB
+      for (const sessAcc of sessionMap.values()) {
+        if (!accounts.some((a) => a.email.toLowerCase() === sessAcc.email.toLowerCase())) {
+          accounts.push(sessAcc);
+        }
+      }
+    } else if (accounts.length === 0) {
       accounts = [];
     }
 
@@ -267,7 +539,7 @@ async function syncSupabaseData(): Promise<void> {
 
       if (oauthEmail) {
         const cleanEmail = oauthEmail.toLowerCase().trim();
-        const unlinkedSet = new Set(store.get<string[]>('triade.unlinked', []));
+        const unlinkedSet = new Set(store.get<string[]>(KEYS.unlinked, []));
 
         // Solo restaurar la cuenta si NO fue desvinculada explícitamente por el usuario
         if (!unlinkedSet.has(cleanEmail)) {
@@ -338,12 +610,19 @@ async function syncSupabaseData(): Promise<void> {
       const validAccountEmails = new Set(accounts.map((a) => a.email.toLowerCase()));
       mails = mails.filter((m) => m.account && validAccountEmails.has(m.account.toLowerCase()));
 
+      if (wasRecentReload) {
+        store.del(KEYS.unlinkNotice);
+        await restoreAccountsToDb();
+      }
+
       for (const acc of accounts) {
         const effToken = acc.access_token || acc.token || (window as any).supabaseProviderToken;
         if (effToken) {
           await syncAccountInbox(acc.email, acc.provider, effToken);
         }
       }
+    } else if (!wasRecentReload) {
+      showPendingUnlinkNotices();
     }
 
     persist();
@@ -359,6 +638,7 @@ async function syncSupabaseData(): Promise<void> {
 // Escuchar cambios de autenticación (ej: redirección tras inicio de sesión con Google OAuth)
 supabase.auth.onAuthStateChange(async (event, session) => {
   if (session && session.user) {
+    cachedAuthToken = session.access_token;
     if (session.provider_token) {
       (window as any).supabaseProviderToken = session.provider_token;
     }
@@ -556,7 +836,6 @@ function renderAccounts(): void {
           ${syncInfo}
         </div>
         <button class="btn sm primary ghost" data-sync="${escapeAttr(a.email)}" title="${t('sync_inbox')}">🔄</button>
-        <button class="btn sm ghost" data-token="${escapeAttr(a.email)}" title="Ingresar/Editar Token API">🔑</button>
         <button class="btn sm ghost" data-remove="${i}">${escapeHtml(t('remove'))}</button>`;
       edit.appendChild(row);
     });
@@ -564,26 +843,10 @@ function renderAccounts(): void {
       b.onclick = async () => {
         const emailToSync = b.dataset.sync!;
         const acc = accounts.find((x) => x.email === emailToSync);
-        const count = await syncAccountInbox(emailToSync, acc?.provider, acc?.token);
+        const count = await syncAccountInbox(emailToSync, acc?.provider, acc?.access_token || acc?.token);
         renderAccounts();
         renderMails();
         toast(`${t('synced_success')} (${count} nuevos)`);
-      };
-    });
-    edit.querySelectorAll<HTMLElement>('[data-token]').forEach((b) => {
-      b.onclick = async () => {
-        const emailToEdit = b.dataset.token!;
-        const acc = accounts.find((x) => x.email === emailToEdit);
-        const newToken = prompt(`Ingresa tu Token OAuth de Google/Microsoft (Bearer Key ya29...) para ${emailToEdit}:`, acc?.token || '');
-        if (newToken !== null) {
-          const tVal = newToken.trim();
-          if (acc) acc.token = tVal || undefined;
-          const count = await syncAccountInbox(emailToEdit, acc?.provider, tVal);
-          persist();
-          renderAccounts();
-          renderMails();
-          toast(`Sincronización completada (${count} correos).`);
-        }
       };
     });
     edit.querySelectorAll<HTMLElement>('[data-remove]').forEach((b) => {
@@ -591,99 +854,7 @@ function renderAccounts(): void {
         const index = +b.dataset.remove!;
         const removed = accounts[index];
         if (!removed) return;
-        const removedEmail = removed.email.toLowerCase().trim();
-
-        if (!confirm(`¿Estás seguro de que deseas desvincular la cuenta ${removedEmail}?`)) {
-          return;
-        }
-
-        // 1. Eliminar de la lista de memoria
-        accounts.splice(index, 1);
-
-        // 2. Si la cuenta eliminada era primaria y aún quedan cuentas, asignar la primera restante como primaria
-        if (removed.primary && accounts.length > 0) {
-          accounts[0].primary = true;
-          if (profile.email.toLowerCase() === removedEmail) {
-            profile.email = accounts[0].email;
-          }
-        }
-
-        // 3. Eliminar los correos de memoria vinculados a esta cuenta
-        mails = mails.filter((m) => m.account.toLowerCase() !== removedEmail);
-
-        // 4. Reiniciar filtro activo si era la cuenta seleccionada
-        if (activeAccount.toLowerCase() === removedEmail) {
-          activeAccount = 'all';
-        }
-
-        // 5. Registrar en la lista de cuentas desvinculadas explícitamente y limpiar token global
-        const unlinked = store.get<string[]>('triade.unlinked', []);
-        if (!unlinked.includes(removedEmail)) {
-          unlinked.push(removedEmail);
-          store.set('triade.unlinked', unlinked);
-        }
-
-        if ((window as any).supabaseProviderToken && removed.access_token === (window as any).supabaseProviderToken) {
-          delete (window as any).supabaseProviderToken;
-        }
-
-        // 6. Eliminar registro en Supabase y actualizar nueva primaria si aplica
-        if (currentUser) {
-          try {
-            // Intentar borrar por ID (Primary Key) si está disponible
-            if (removed.id) {
-              const { error: idErr } = await supabase
-                .from('user_accounts')
-                .delete()
-                .eq('id', removed.id);
-              if (idErr) console.warn('Error al eliminar user_account por ID:', idErr.message);
-            }
-
-            // Borrado por coincidencia de user_id y correo (respaldo)
-            const { error: accErr } = await supabase
-              .from('user_accounts')
-              .delete()
-              .eq('user_id', currentUser.id)
-              .ilike('email', removedEmail);
-
-            if (accErr) console.warn('Error al desvincular cuenta en Supabase user_accounts:', accErr.message);
-
-            if (accounts.length > 0 && accounts[0]) {
-              await supabase
-                .from('user_accounts')
-                .update({ is_primary: true })
-                .eq('user_id', currentUser.id)
-                .ilike('email', accounts[0].email);
-            }
-
-            // Intentar desvincular la identidad de Supabase Auth si fue enlazada
-            if (currentUser.identities && Array.isArray(currentUser.identities)) {
-              const matchingIdentity = currentUser.identities.find(
-                (id: any) => id.identity_data?.email?.toLowerCase() === removedEmail || id.email?.toLowerCase() === removedEmail
-              );
-              if (matchingIdentity) {
-                await supabase.auth.unlinkIdentity(matchingIdentity);
-              }
-            }
-          } catch (err) {
-            console.error('Excepción al eliminar cuenta de Supabase:', err);
-          }
-        }
-
-        // 7. Si no quedan cuentas, limpiar localStorage
-        if (!accounts.length) {
-          accounts = [];
-          mails = [];
-          store.del(KEYS.accounts);
-          store.del(KEYS.mails);
-        }
-
-        // 8. Persistir y actualizar interfaz
-        persist();
-        hydrateProfileForm();
-        renderAccounts();
-        renderMails();
-        toast(`✔ Cuenta ${removedEmail} desvinculada exitosamente.`);
+        await unlinkAccountByEmail(removed.email);
       };
     });
   }
@@ -814,6 +985,10 @@ function renderMails(): void {
 }
 
 function handleMailAction(id: string, action: string): void {
+  void handleMailActionAsync(id, action);
+}
+
+async function handleMailActionAsync(id: string, action: string): Promise<void> {
   const m = mails.find((x) => x.id === id);
   if (!m) return;
   if (action === 'star') {
@@ -827,7 +1002,13 @@ function handleMailAction(id: string, action: string): void {
   } else if (action === 'restore') {
     m.folder = 'inbox';
   } else if (action === 'delete') {
-    if (!confirm(t('confirm_delete'))) return;
+    const confirmed = await showConfirm({
+      title: t('delete_forever'),
+      message: t('confirm_delete'),
+      confirmText: t('delete_forever'),
+      danger: true,
+    });
+    if (!confirmed) return;
     const idx = mails.findIndex((x) => x.id === id);
     if (idx >= 0) mails.splice(idx, 1);
     toast(t('mail_deleted'));
@@ -1023,12 +1204,68 @@ function hydrateAppearance(): void {
 
 // ---------- Toast ----------
 let toastTimer: ReturnType<typeof setTimeout> | undefined;
-function toast(msg: string): void {
+function toast(msg: string, duration = 2200): void {
   const el = document.getElementById('toast')!;
   el.textContent = msg;
   el.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove('show'), 2200);
+  toastTimer = setTimeout(() => el.classList.remove('show'), duration);
+}
+
+// ---------- Confirm modal ----------
+type ConfirmOptions = {
+  title?: string;
+  message: string;
+  confirmText?: string;
+  cancelText?: string;
+  danger?: boolean;
+};
+
+let confirmResolver: ((value: boolean) => void) | null = null;
+
+function closeConfirmModal(): void {
+  document.getElementById('confirmModal')?.classList.remove('open');
+  confirmResolver = null;
+}
+
+function initConfirmModal(): void {
+  const modal = document.getElementById('confirmModal')!;
+  const okBtn = document.getElementById('confirmOk') as HTMLButtonElement;
+  const cancelBtn = document.getElementById('confirmCancel') as HTMLButtonElement;
+
+  const finishConfirm = (confirmed: boolean) => {
+    const resolver = confirmResolver;
+    closeConfirmModal();
+    if (resolver) resolver(confirmed);
+  };
+
+  okBtn.onclick = () => finishConfirm(true);
+  cancelBtn.onclick = () => finishConfirm(false);
+  modal.addEventListener('click', (e) => {
+    if ((e.target as HTMLElement).id === 'confirmModal') finishConfirm(false);
+  });
+}
+
+function showConfirm(opts: ConfirmOptions): Promise<boolean> {
+  return new Promise((resolve) => {
+    confirmResolver = resolve;
+
+    const modal = document.getElementById('confirmModal')!;
+    const titleEl = document.getElementById('confirmTitle')!;
+    const messageEl = document.getElementById('confirmMessage')!;
+    const okBtn = document.getElementById('confirmOk') as HTMLButtonElement;
+    const cancelBtn = document.getElementById('confirmCancel') as HTMLButtonElement;
+
+    titleEl.textContent = opts.title || t('confirm');
+    messageEl.textContent = opts.message;
+    okBtn.textContent = opts.confirmText || t('confirm');
+    cancelBtn.textContent = opts.cancelText || t('cancel');
+    okBtn.classList.toggle('danger', !!opts.danger);
+    okBtn.classList.toggle('primary', !opts.danger);
+
+    modal.classList.add('open');
+    setTimeout(() => okBtn.focus(), 60);
+  });
 }
 
 // ---------- Compose ----------
@@ -1038,11 +1275,51 @@ let scheduledFor: string | null = null;
 
 type DraftLike = Partial<Mail> & { id?: string };
 
+function populateComposeFromSelect(): void {
+  const sel = document.getElementById('composeFrom') as HTMLSelectElement | null;
+  if (!sel) return;
+  sel.innerHTML = '';
+  if (!accounts.length) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = t('no_linked_accounts');
+    sel.appendChild(opt);
+    sel.disabled = true;
+    composeFromAccount = '';
+    return;
+  }
+  sel.disabled = false;
+  accounts.forEach((a) => {
+    const opt = document.createElement('option');
+    opt.value = a.email;
+    const providerLabel = a.provider === 'gmail' ? 'Gmail' : a.provider === 'outlook' ? 'Outlook' : 'Email';
+    opt.textContent = `${a.email} (${providerLabel})${a.primary ? ' ★' : ''}`;
+    sel.appendChild(opt);
+  });
+  const preferred =
+    composeFromAccount && accounts.some((a) => a.email === composeFromAccount)
+      ? composeFromAccount
+      : activeAccount !== 'all' && accounts.some((a) => a.email === activeAccount)
+        ? activeAccount
+        : accounts.find((a) => a.primary)?.email || accounts[0]?.email || '';
+  sel.value = preferred;
+  composeFromAccount = preferred;
+  sel.onchange = () => {
+    composeFromAccount = sel.value;
+  };
+}
+
 function openCompose(draft?: DraftLike): void {
   const modal = document.getElementById('composeModal')!;
   composingDraftId = draft?.id ?? null;
   composeAttachments = draft?.attachments ? [...draft.attachments] : [];
   scheduledFor = draft?.scheduledFor ?? null;
+  populateComposeFromSelect();
+  if (draft?.account && accounts.some((a) => a.email === draft.account)) {
+    composeFromAccount = draft.account;
+    const sel = document.getElementById('composeFrom') as HTMLSelectElement;
+    if (sel) sel.value = draft.account;
+  }
   (document.getElementById('composeTo') as HTMLInputElement).value = draft?.to || '';
   (document.getElementById('composeSubject') as HTMLInputElement).value = draft?.subject || '';
   document.getElementById('composeBody')!.innerHTML = draft?.bodyHtml || (draft?.body ? escapeHtml(draft.body) : '');
@@ -1100,52 +1377,102 @@ async function sendMail(): Promise<void> {
     document.getElementById('composeTo')!.focus();
     return;
   }
+
+  const fromSel = document.getElementById('composeFrom') as HTMLSelectElement;
+  const acct = (fromSel?.value || composeFromAccount || '').trim().toLowerCase();
+  if (!acct || !accounts.some((a) => a.email.toLowerCase() === acct)) {
+    toast(`⚠️ ${t('send_error_no_account')}`);
+    fromSel?.focus();
+    return;
+  }
+
+  const targetAcc = accounts.find((a) => a.email.toLowerCase() === acct)!;
+  const effToken = await resolveSendToken(targetAcc);
+  const sendProvider = inferProvider(targetAcc.email, effToken || undefined) !== 'custom'
+    ? inferProvider(targetAcc.email, effToken || undefined)
+    : targetAcc.provider || 'custom';
+
+  if (!effToken) {
+    toast(`⚠️ ${t('send_error_no_token')}`);
+    return;
+  }
+
+  // Actualizar token en la cuenta si obtuvimos uno más reciente
+  targetAcc.access_token = effToken;
+  targetAcc.token = effToken;
+  persist();
+
   if (composingDraftId) {
     const idx = mails.findIndex((x) => x.id === composingDraftId);
     if (idx >= 0) mails.splice(idx, 1);
   }
+
   const now = new Date();
   const timeStr = scheduledFor
     ? new Date(scheduledFor).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
     : `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-  const acct = accounts.find((a) => a.primary)?.email || accounts[0]?.email || profile.email;
 
-  const targetAcc = accounts.find((a) => a.email.toLowerCase() === acct.toLowerCase());
-  const effToken = targetAcc?.access_token || targetAcc?.token || (window as any).supabaseProviderToken;
+  let sentOk = false;
+  const bodyContent = f.bodyHtml || f.body;
+  const providerLabel = sendProvider === 'gmail' ? 'Gmail' : sendProvider === 'outlook' ? 'Outlook' : 'Email';
 
-  if (targetAcc && targetAcc.provider === 'gmail' && effToken) {
-    toast('📤 Enviando correo en tiempo real por Gmail...');
-    const ok = await sendRealGmailMail(effToken, f.to, f.subject || '(Sin asunto)', f.bodyHtml || f.body);
-    if (ok) {
-      toast('✔ Correo enviado exitosamente vía Gmail API');
+  if (!scheduledFor) {
+    toast(`📤 Enviando correo vía ${providerLabel}…`);
+    let result: SendResult;
+    if (sendProvider === 'gmail') {
+      result = await sendRealGmailMail(effToken, f.to, f.subject || '(Sin asunto)', bodyContent);
+    } else if (sendProvider === 'outlook') {
+      result = await sendRealOutlookMail(effToken, f.to, f.subject || '(Sin asunto)', bodyContent);
     } else {
-      toast('⚠️ Error al enviar vía Gmail API. Guardado en carpeta Enviados.');
+      toast(`⚠️ ${t('send_error_no_account')}`);
+      return;
     }
+
+    if (!result.ok) {
+      const msg = result.message || t('send_error_failed');
+      toast(`⚠️ ${msg}`, 5000);
+      if (result.code === 'missing_scope' || result.code === 'expired_token' || result.code === 'invalid_token') {
+        const relink = await showConfirm({
+          title: t('manage_accounts'),
+          message: `${msg}\n\n${t('confirm_relink')}`,
+          confirmText: t('connect_sync'),
+        });
+        if (relink) {
+          closeCompose();
+          document.getElementById('settingsModal')?.classList.add('open');
+          document.querySelector<HTMLElement>('.modal-nav .nav-item[data-section="parameters"]')?.click();
+        }
+      }
+      return;
+    }
+    sentOk = true;
+    toast(`✔ Correo enviado exitosamente desde ${targetAcc.email}`);
   } else {
-    toast(scheduledFor ? t('mail_scheduled') : t('mail_sent'));
+    toast(t('mail_scheduled'));
+    sentOk = true;
   }
 
   const newMailObj: Mail = {
     id: uid('m'),
-    from: profile.name || acct,
-    fromEmail: acct,
+    from: profile.name || targetAcc.email,
+    fromEmail: targetAcc.email,
     to: f.to,
     subject: f.subject || '(sin asunto)',
     body: (f.body || '').split('\n')[0].slice(0, 180),
     bodyHtml: f.bodyHtml,
     attachments: composeAttachments.slice(),
-    account: acct,
+    account: targetAcc.email,
     time: timeStr,
     timestamp: Date.now(),
     unread: false,
     starred: false,
-    folder: 'sent',
+    folder: scheduledFor ? 'drafts' : 'sent',
     scheduledFor: scheduledFor || null,
   };
 
   mails.unshift(newMailObj);
 
-  if (currentUser) {
+  if (currentUser && sentOk) {
     supabase.from('mails').insert({
       user_id: currentUser.id,
       from_name: newMailObj.from,
@@ -1177,7 +1504,11 @@ function saveDraft(): void {
   }
   const now = new Date();
   const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-  const acct = accounts.find((a) => a.primary)?.email || accounts[0]?.email || profile.email;
+  const acct = (document.getElementById('composeFrom') as HTMLSelectElement)?.value
+    || composeFromAccount
+    || accounts.find((a) => a.primary)?.email
+    || accounts[0]?.email
+    || profile.email;
   const payload = {
     to: f.to,
     subject: f.subject || '(sin asunto)',
@@ -1340,6 +1671,7 @@ function updateToolbarState(): void {
 // ---------- Init ----------
 document.addEventListener('DOMContentLoaded', async () => {
   applyI18n();
+  initConfirmModal();
   renderAccounts();
   renderMails();
   renderCategoriesEditor();
@@ -1413,9 +1745,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   const linkModal = document.getElementById('linkModal')!;
   const linkUrlInput = document.getElementById('linkUrlInput') as HTMLInputElement;
   const linkTextInput = document.getElementById('linkTextInput') as HTMLInputElement;
+  const linkModalTitle = linkModal.querySelector('.link-header h3')!;
+  const linkInsertConfirmBtn = document.getElementById('insertLinkConfirm') as HTMLButtonElement;
+  let linkInsertMode: 'link' | 'drive' = 'link';
   const closeLinkModal = () => linkModal.classList.remove('open');
 
   document.getElementById('insertLinkBtn')!.onclick = () => {
+    linkInsertMode = 'link';
+    linkModalTitle.textContent = t('insert_link');
+    linkInsertConfirmBtn.textContent = t('insert');
     linkUrlInput.value = 'https://';
     linkTextInput.value = '';
     linkModal.classList.add('open');
@@ -1426,11 +1764,17 @@ document.addEventListener('DOMContentLoaded', async () => {
   linkModal.addEventListener('click', (e) => {
     if ((e.target as HTMLElement).id === 'linkModal') closeLinkModal();
   });
-  document.getElementById('insertLinkConfirm')!.onclick = () => {
+  linkInsertConfirmBtn.onclick = () => {
     const url = linkUrlInput.value.trim();
     const text = linkTextInput.value.trim() || url;
     if (!url) return;
-    insertAtEditor(`<a href="${escapeAttr(url)}" target="_blank" rel="noopener">${escapeHtml(text)}</a>`);
+    if (linkInsertMode === 'drive') {
+      insertAtEditor(`<a href="${escapeAttr(url)}" target="_blank" rel="noopener">☁ ${escapeHtml(text)}</a>`);
+      composeAttachments.push({ name: 'Google Drive', size: 0, type: 'drive', url });
+      renderAttachments();
+    } else {
+      insertAtEditor(`<a href="${escapeAttr(url)}" target="_blank" rel="noopener">${escapeHtml(text)}</a>`);
+    }
     closeLinkModal();
   };
   linkTextInput.addEventListener('keydown', (e) => {
@@ -1467,11 +1811,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     (e.target as HTMLInputElement).value = '';
   });
   document.getElementById('insertDriveBtn')!.onclick = () => {
-    const url = prompt(t('drive_url_prompt'), 'https://drive.google.com/');
-    if (!url) return;
-    insertAtEditor(`<a href="${escapeAttr(url)}" target="_blank" rel="noopener">☁ ${escapeHtml(url)}</a>`);
-    composeAttachments.push({ name: 'Google Drive', size: 0, type: 'drive', url });
-    renderAttachments();
+    linkInsertMode = 'drive';
+    linkModalTitle.textContent = t('drive_url_title');
+    linkInsertConfirmBtn.textContent = t('insert');
+    linkUrlInput.value = 'https://drive.google.com/';
+    linkTextInput.value = 'Google Drive';
+    linkModal.classList.add('open');
+    setTimeout(() => linkUrlInput.focus(), 50);
   };
 
   buildEmojiGrid();
@@ -1548,7 +1894,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
   document.getElementById('logoutBtn')!.onclick = async () => {
-    if (confirm(t('confirm_logout'))) {
+    const confirmed = await showConfirm({
+      title: t('logout'),
+      message: t('confirm_logout'),
+      confirmText: t('logout'),
+      danger: true,
+    });
+    if (confirmed) {
       await supabase.auth.signOut();
       store.del(KEYS.session);
       window.location.href = './';
@@ -1625,18 +1977,21 @@ document.addEventListener('DOMContentLoaded', async () => {
       const { error } = await supabase.auth.linkIdentity({
         provider: 'google',
         options: {
-          scopes: 'https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/userinfo.email',
+          scopes: GOOGLE_OAUTH_SCOPES,
           redirectTo: window.location.origin + window.location.pathname,
+          queryParams: {
+            prompt: 'consent',
+            access_type: 'online',
+          },
         },
       });
 
       if (error) {
         console.warn('Supabase linkIdentity error:', error.message);
-        // Fallback a redirección directa con el client ID
         let clientId = (import.meta as any).env.PUBLIC_GOOGLE_CLIENT_ID || (window as any).PUBLIC_GOOGLE_CLIENT_ID || '1053272205885-03ecg2aig51gds1f1va4h55n4j5t1l2l.apps.googleusercontent.com';
         const redirectUri = encodeURIComponent(window.location.origin + window.location.pathname);
-        const scope = encodeURIComponent('https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/userinfo.email');
-        window.location.href = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId.trim()}&redirect_uri=${redirectUri}&response_type=token&scope=${scope}&prompt=select_account`;
+        const scope = encodeURIComponent(GOOGLE_OAUTH_SCOPES);
+        window.location.href = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId.trim()}&redirect_uri=${redirectUri}&response_type=token&scope=${scope}&prompt=consent&access_type=online`;
       }
     } catch (err: any) {
       toast('⚠️ Error al conectar con Google OAuth.');
@@ -1645,16 +2000,27 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   const triggerMicrosoftOAuth = async () => {
     try {
-      const { error } = await supabase.auth.signInWithOAuth({
+      const { error } = await supabase.auth.linkIdentity({
         provider: 'azure',
         options: {
-          scopes: 'https://graph.microsoft.com/Mail.Read',
+          scopes: MICROSOFT_OAUTH_SCOPES,
           redirectTo: window.location.origin + window.location.pathname,
+          queryParams: { prompt: 'consent' },
         },
       });
       if (error) {
-        toast('⚠️ Microsoft OAuth no habilitado en Supabase.');
-        console.warn('OAuth Microsoft Error:', error.message);
+        const { error: signInErr } = await supabase.auth.signInWithOAuth({
+          provider: 'azure',
+          options: {
+            scopes: MICROSOFT_OAUTH_SCOPES,
+            redirectTo: window.location.origin + window.location.pathname,
+            queryParams: { prompt: 'consent' },
+          },
+        });
+        if (signInErr) {
+          toast('⚠️ Microsoft OAuth no habilitado en Supabase.');
+          console.warn('OAuth Microsoft Error:', signInErr.message);
+        }
       }
     } catch (err: any) {
       toast('⚠️ Error al conectar con Microsoft OAuth.');
@@ -1778,6 +2144,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
+      const confirmModal = document.getElementById('confirmModal');
+      if (confirmModal?.classList.contains('open')) {
+        document.getElementById('confirmCancel')!.click();
+        return;
+      }
       document.getElementById('composeModal')!.classList.remove('open');
       document.getElementById('settingsModal')!.classList.remove('open');
       document.getElementById('readerModal')!.classList.remove('open');
@@ -1786,5 +2157,20 @@ document.addEventListener('DOMContentLoaded', async () => {
       document.getElementById('schedulePop')!.classList.remove('open');
       userMenu.classList.remove('open');
     }
+  });
+
+  // Desvincular cuentas de correo al cerrar el navegador (no en recarga de página)
+  let skipCloseCleanup = false;
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'F5' || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'r')) {
+      skipCloseCleanup = true;
+    }
+  });
+  window.addEventListener('beforeunload', () => {
+    sessionStorage.setItem('triade.unloadTime', Date.now().toString());
+  });
+  window.addEventListener('pagehide', (event) => {
+    if (skipCloseCleanup || event.persisted) return;
+    unlinkAllAccountsOnBrowserClose();
   });
 });

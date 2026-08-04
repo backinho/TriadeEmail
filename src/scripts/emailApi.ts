@@ -3,6 +3,52 @@ import type { Mail, Folder } from './common';
 const uid = (p = 'm'): string =>
   p + '_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-3);
 
+export type SendResult =
+  | { ok: true }
+  | { ok: false; status?: number; code?: string; message: string };
+
+function toBase64Url(str: string): string {
+  const bytes = new TextEncoder().encode(str);
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function encodeMimeSubject(subject: string): string {
+  if (/^[\x20-\x7E]*$/.test(subject)) return subject;
+  const bytes = new TextEncoder().encode(subject);
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return `=?UTF-8?B?${btoa(binary)}?=`;
+}
+
+function parseApiError(status: number, errText: string): string {
+  try {
+    const data = JSON.parse(errText);
+    const msg = data?.error?.message || data?.error_description || data?.message;
+    if (msg) return String(msg);
+  } catch {
+    // ignore
+  }
+  return errText.slice(0, 200) || `HTTP ${status}`;
+}
+
+export async function checkGoogleTokenScopes(accessToken: string): Promise<{ valid: boolean; hasSend: boolean; scopes: string }> {
+  try {
+    const res = await fetch(`https://www.googleapis.com/oauth2/v1/tokeninfo?access_token=${encodeURIComponent(accessToken)}`);
+    if (!res.ok) return { valid: false, hasSend: false, scopes: '' };
+    const data = await res.json();
+    const scopes = String(data.scope || '');
+    return {
+      valid: true,
+      hasSend: scopes.includes('gmail.send') || scopes.includes('mail.google.com') || scopes.includes('gmail.compose'),
+      scopes,
+    };
+  } catch {
+    return { valid: false, hasSend: false, scopes: '' };
+  }
+}
+
 /**
  * Recurse through Gmail payload parts to extract body text and html
  */
@@ -38,28 +84,42 @@ function extractGmailBody(payload: any): { text: string; html: string } {
 
 /**
  * Send email in real-time via Google Gmail API
- * Endpoint: POST https://gmail.googleapis.com/upload/gmail/v1/users/me/messages/send
  */
 export async function sendRealGmailMail(
   accessToken: string,
   to: string,
   subject: string,
   bodyHtmlOrText: string
-): Promise<boolean> {
+): Promise<SendResult> {
   try {
+    if (!accessToken.startsWith('ya29')) {
+      return { ok: false, code: 'invalid_token', message: 'Token de Google inválido. Vuelve a vincular la cuenta.' };
+    }
+
+    const scopeCheck = await checkGoogleTokenScopes(accessToken);
+    if (scopeCheck.valid && !scopeCheck.hasSend) {
+      return {
+        ok: false,
+        code: 'missing_scope',
+        message: 'La cuenta no tiene permiso de envío (gmail.send). Desvincúlala y vuelve a vincularla.',
+      };
+    }
+
+    const safeBody = bodyHtmlOrText || '<p></p>';
+    const bodyBytes = new TextEncoder().encode(safeBody);
+    let bodyBinary = '';
+    for (const byte of bodyBytes) bodyBinary += String.fromCharCode(byte);
+    const bodyBase64 = btoa(bodyBinary);
+
     const rawMessage = [
       `To: ${to}`,
-      `Subject: ${subject}`,
-      'Content-Type: text/html; charset=utf-8',
+      `Subject: ${encodeMimeSubject(subject || '(Sin asunto)')}`,
       'MIME-Version: 1.0',
+      'Content-Type: text/html; charset=UTF-8',
+      'Content-Transfer-Encoding: base64',
       '',
-      bodyHtmlOrText,
+      bodyBase64,
     ].join('\r\n');
-
-    const encodedMessage = btoa(unescape(encodeURIComponent(rawMessage)))
-      .replace(/\+/g, '-')
-      .replace(/\//g, '_')
-      .replace(/=+$/, '');
 
     const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
       method: 'POST',
@@ -67,18 +127,81 @@ export async function sendRealGmailMail(
         Authorization: `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ raw: encodedMessage }),
+      body: JSON.stringify({ raw: toBase64Url(rawMessage) }),
     });
 
     if (!res.ok) {
       const errText = await res.text();
       console.warn('Gmail API Send error:', res.status, errText);
-      return false;
+      const detail = parseApiError(res.status, errText);
+      if (res.status === 403) {
+        return { ok: false, status: 403, code: 'missing_scope', message: `Permiso denegado: ${detail}. Desvincula y vuelve a vincular la cuenta.` };
+      }
+      if (res.status === 401) {
+        return { ok: false, status: 401, code: 'expired_token', message: 'Token expirado. Vuelve a vincular la cuenta de Gmail.' };
+      }
+      return { ok: false, status: res.status, message: detail };
     }
-    return true;
+    return { ok: true };
   } catch (err) {
     console.error('sendRealGmailMail exception:', err);
-    return false;
+    return { ok: false, message: err instanceof Error ? err.message : 'Error desconocido al enviar' };
+  }
+}
+
+/**
+ * Send email in real-time via Microsoft Graph API
+ */
+export async function sendRealOutlookMail(
+  accessToken: string,
+  to: string,
+  subject: string,
+  bodyHtmlOrText: string
+): Promise<SendResult> {
+  try {
+    if (accessToken.startsWith('eyJ')) {
+      return { ok: false, code: 'invalid_token', message: 'Token de Microsoft inválido. Vuelve a vincular la cuenta.' };
+    }
+
+    const res = await fetch('https://graph.microsoft.com/v1.0/me/sendMail', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        message: {
+          subject: subject || '(Sin asunto)',
+          body: {
+            contentType: 'HTML',
+            content: bodyHtmlOrText || '<p></p>',
+          },
+          toRecipients: [
+            {
+              emailAddress: { address: to },
+            },
+          ],
+        },
+        saveToSentItems: true,
+      }),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      console.warn('Outlook API Send error:', res.status, errText);
+      const detail = parseApiError(res.status, errText);
+      if (res.status === 403) {
+        return { ok: false, status: 403, code: 'missing_scope', message: `Permiso denegado: ${detail}. Desvincula y vuelve a vincular la cuenta.` };
+      }
+      if (res.status === 401) {
+        return { ok: false, status: 401, code: 'expired_token', message: 'Token expirado. Vuelve a vincular la cuenta de Outlook.' };
+      }
+      return { ok: false, status: res.status, message: detail };
+    }
+    return { ok: true };
+  } catch (err) {
+    console.error('sendRealOutlookMail exception:', err);
+    return { ok: false, message: err instanceof Error ? err.message : 'Error desconocido al enviar' };
   }
 }
 

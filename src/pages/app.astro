@@ -98,6 +98,10 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     </div>
     <div class="compose-body">
       <div class="compose-row">
+        <label data-i18n="from_account">De</label>
+        <select class="input" id="composeFrom" aria-label="Cuenta remitente"></select>
+      </div>
+      <div class="compose-row">
         <label data-i18n="to">Para</label>
         <input class="input" id="composeTo" data-i18n-placeholder="to_placeholder" />
       </div>
@@ -228,6 +232,22 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     <div class="link-footer">
       <button class="btn ghost" id="cancelLinkBtn" data-i18n="cancel">Cancelar</button>
       <button class="btn primary" id="insertLinkConfirm" data-i18n="insert">Insertar</button>
+    </div>
+  </div>
+</div>
+
+<!-- CONFIRM MODAL -->
+<div class="confirm-backdrop" id="confirmModal" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+  <div class="confirm-window glass glass-strong">
+    <div class="confirm-header">
+      <h3 id="confirmTitle">—</h3>
+    </div>
+    <div class="confirm-body">
+      <p id="confirmMessage">—</p>
+    </div>
+    <div class="confirm-footer">
+      <button class="btn ghost" id="confirmCancel" data-i18n="cancel">Cancelar</button>
+      <button class="btn primary" id="confirmOk" data-i18n="confirm">Confirmar</button>
     </div>
   </div>
 </div>
