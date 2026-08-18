@@ -159,7 +159,7 @@ export async function sendRealOutlookMail(
   bodyHtmlOrText: string
 ): Promise<SendResult> {
   try {
-    if (accessToken.startsWith('eyJ')) {
+    if (!accessToken || !accessToken.trim()) {
       return { ok: false, code: 'invalid_token', message: 'Token de Microsoft inválido. Vuelve a vincular la cuenta.' };
     }
 

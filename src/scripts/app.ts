@@ -381,19 +381,75 @@ async function fetchOutlookUserEmail(accessToken: string): Promise<string | null
   return null;
 }
 
+function base64UrlEncode(value: ArrayBuffer): string {
+  const bytes = new Uint8Array(value);
+  let binary = '';
+  bytes.forEach((byte) => {
+    binary += String.fromCharCode(byte);
+  });
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+async function createMicrosoftPkceChallenge(): Promise<{ verifier: string; challenge: string }> {
+  const verifier = Array.from({ length: 64 }, () => 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~'[Math.floor(Math.random() * 64)]).join('');
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+  return { verifier, challenge: base64UrlEncode(digest) };
+}
+
+async function exchangeMicrosoftCodeForToken(code: string, verifier: string): Promise<string | null> {
+  const clientId = (import.meta as any).env.PUBLIC_MICROSOFT_CLIENT_ID || (window as any).PUBLIC_MICROSOFT_CLIENT_ID || '';
+  if (!clientId) {
+    console.warn('PUBLIC_MICROSOFT_CLIENT_ID no definido.');
+    return null;
+  }
+
+  const redirectUri = window.location.origin + window.location.pathname;
+  const body = new URLSearchParams({
+    client_id: clientId,
+    scope: MICROSOFT_OAUTH_SCOPES,
+    code,
+    redirect_uri: redirectUri,
+    grant_type: 'authorization_code',
+    code_verifier: verifier,
+  });
+
+  try {
+    const res = await fetch('https://login.microsoftonline.com/common/oauth2/v2.0/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      console.warn('Microsoft token exchange failed:', res.status, errText);
+      return null;
+    }
+
+    const data = await res.json();
+    return data.access_token || null;
+  } catch (err) {
+    console.warn('Error exchanging Microsoft code for token:', err);
+    return null;
+  }
+}
+
 async function handleDirectOAuthRedirect(): Promise<boolean> {
   const hash = window.location.hash || '';
-  if (!hash.includes('access_token=') && !hash.includes('provider_token=')) return false;
+  const search = window.location.search || '';
+  const params = new URLSearchParams((hash ? hash.replace(/^#/, '') : search.replace(/^\?/, '')));
 
-  const params = new URLSearchParams(hash.replace(/^#/, ''));
   const providerToken = params.get('provider_token');
   const accessToken = params.get('access_token');
+  const code = params.get('code');
+  const savedVerifier = sessionStorage.getItem('triade_ms_pkce_verifier');
 
-  const tokenToUse = (providerToken && providerToken.startsWith('ya29'))
-    ? providerToken
-    : (accessToken && !accessToken.startsWith('eyJ'))
-      ? accessToken
-      : providerToken;
+  let tokenToUse: string | null = providerToken || accessToken || null;
+
+  if (!tokenToUse && code && savedVerifier) {
+    tokenToUse = await exchangeMicrosoftCodeForToken(code, savedVerifier);
+    sessionStorage.removeItem('triade_ms_pkce_verifier');
+  }
 
   if (!tokenToUse) return false;
 
@@ -2018,8 +2074,29 @@ document.addEventListener('DOMContentLoaded', async () => {
           },
         });
         if (signInErr) {
-          toast('⚠️ Microsoft OAuth no habilitado en Supabase.');
-          console.warn('OAuth Microsoft Error:', signInErr.message);
+          const msClientId = (import.meta as any).env.PUBLIC_MICROSOFT_CLIENT_ID || (window as any).PUBLIC_MICROSOFT_CLIENT_ID || '';
+          if (!msClientId) {
+            toast('⚠️ Microsoft OAuth no habilitado. Añade PUBLIC_MICROSOFT_CLIENT_ID.');
+            console.warn('OAuth Microsoft Error:', signInErr.message);
+            return;
+          }
+
+          const { verifier, challenge } = await createMicrosoftPkceChallenge();
+          sessionStorage.setItem('triade_ms_pkce_verifier', verifier);
+
+          const params = new URLSearchParams({
+            client_id: msClientId,
+            response_type: 'code',
+            redirect_uri: window.location.origin + window.location.pathname,
+            response_mode: 'query',
+            scope: MICROSOFT_OAUTH_SCOPES,
+            prompt: 'consent',
+            state: crypto.randomUUID(),
+            code_challenge: challenge,
+            code_challenge_method: 'S256',
+          });
+
+          window.location.href = `https://login.microsoftonline.com/common/oauth2/v2.0/authorize?${params.toString()}`;
         }
       }
     } catch (err: any) {
