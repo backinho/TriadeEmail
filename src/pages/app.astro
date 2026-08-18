@@ -1,5 +1,7 @@
 ---
 import BaseLayout from '../layouts/BaseLayout.astro';
+import logoTypeNegative from '../images/LOGOTIPO-NEGATIVO.png';
+import logoTypePositive from '../images/LOGOTIPO-POSITIVO.png';
 ---
 
 <BaseLayout title="Triade Mail — Bandeja">
@@ -10,10 +12,8 @@ import BaseLayout from '../layouts/BaseLayout.astro';
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
     </button>
     <div class="logo">
-      <svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M16 16 L6 6 M16 16 L26 6 M16 16 L16 28"/>
-      </svg>
-      <b>TRIADE</b>
+      <img src={logoTypeNegative.src} alt="Triade" class="brand-type brand-type-negative" />
+      <img src={logoTypePositive.src} alt="Triade" class="brand-type brand-type-positive" />
     </div>
     <div class="search">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>

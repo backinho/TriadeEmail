@@ -1,14 +1,23 @@
 ---
 import BaseLayout from '../layouts/BaseLayout.astro';
+import symbolNegative from '../images/SIMBOLO NEGATIVA.png';
+import symbolPositive from '../images/SIMBOLO POSITIVO.png';
+import logoNegative from '../images/LOGO-NEGATIVO.png';
+import logoPositive from '../images/LOGO-POSITIVO.png';
 ---
 
 <BaseLayout title="Triade Mail — Iniciar sesión">
   <main class="auth-wrap">
     <section class="glass glass-strong auth-card">
-      <div class="logo">
-        <svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M16 16 L6 6 M16 16 L26 6 M16 16 L16 28" />
-        </svg>
+      <div class="auth-branding">
+        <div class="symbols">
+          <img src={symbolNegative.src} alt="Símbolo negativo" class="symbol symbol-negative" />
+          <img src={symbolPositive.src} alt="Símbolo positivo" class="symbol symbol-positive" />
+        </div>
+        <div class="logos">
+          <img src={logoNegative.src} alt="Logo negativo" class="logo-img logo-negative" />
+          <img src={logoPositive.src} alt="Logo positivo" class="logo-img logo-positive" />
+        </div>
         <b>TRIADE · MAIL</b>
       </div>
       <h1 data-i18n="welcome_back">Bienvenido de nuevo</h1>

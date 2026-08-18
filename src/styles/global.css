@@ -91,8 +91,12 @@ body{
 .glass-strong{ background:var(--card-strong); border-color:var(--border-strong) }
 
 .logo{ display:inline-flex; align-items:center; gap:.7rem; font-weight:700; letter-spacing:.22em; font-size:.95rem; white-space:nowrap }
-.logo svg{ width:26px; height:26px; color:var(--accent); filter: drop-shadow(0 0 10px rgba(var(--accent-glow),.6)); flex-shrink:0 }
-.logo b{ font-weight:800; letter-spacing:.3em }
+.logo .brand-type{ display:block; height:22px; width:auto; object-fit:contain; max-width:120px; filter: drop-shadow(0 0 10px rgba(var(--accent-glow),.24)); }
+.logo .brand-type-positive{ display:none }
+:root[data-theme="light"] .logo .brand-type-positive{ display:block }
+:root[data-theme="light"] .logo .brand-type-negative{ display:none }
+:root:not([data-theme="light"]) .logo .brand-type-negative{ display:block }
+:root:not([data-theme="light"]) .logo .brand-type-positive{ display:none }
 
 /* Buttons / inputs */
 .btn{
@@ -136,6 +140,25 @@ body{
 .auth-card{ width: min(440px, 100%); padding: 2.2rem 2rem }
 .auth-card h1{ margin:.4rem 0 .3rem; font-size:1.6rem; letter-spacing:.02em }
 .auth-card .sub{ color:var(--fg-dim); margin-bottom:1.8rem; font-size:.92rem }
+
+/* Branding images for auth: symbols arriba, logos abajo. Theme-aware (positive=negro on light, negative=blanco on dark) */
+.auth-branding{ display:flex; flex-direction:column; align-items:center; gap:.6rem; margin-bottom:1rem }
+.auth-branding .symbols, .auth-branding .logos{ display:flex; gap:.6rem; align-items:center; justify-content:center }
+.auth-branding img{ max-width:84px; height:auto; display:block }
+.auth-branding .logo-img{ max-width:160px }
+.auth-branding .symbol-positive, .auth-branding .logo-positive{ display:none }
+
+/* Light theme: mostrar positivo (negro) */
+:root[data-theme="light"] .auth-branding .symbol-positive,
+:root[data-theme="light"] .auth-branding .logo-positive{ display:block }
+:root[data-theme="light"] .auth-branding .symbol-negative,
+:root[data-theme="light"] .auth-branding .logo-negative{ display:none }
+
+/* Dark (default): mostrar negativo (blanco) */
+:root:not([data-theme="light"]) .auth-branding .symbol-negative,
+:root:not([data-theme="light"]) .auth-branding .logo-negative{ display:block }
+:root:not([data-theme="light"]) .auth-branding .symbol-positive,
+:root:not([data-theme="light"]) .auth-branding .logo-positive{ display:none }
 .auth-links{ display:flex; justify-content:space-between; margin-top:.4rem; font-size:.85rem }
 .auth-links a{ color:var(--fg-dim); text-decoration:none }
 .auth-links a:hover{ color:var(--accent) }
