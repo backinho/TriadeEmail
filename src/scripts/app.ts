@@ -409,12 +409,12 @@ async function fetchOutlookUserEmail(accessToken: string): Promise<string | null
 }
 
 async function refreshMicrosoftAccessToken(refreshToken: string): Promise<string | null> {
-  const clientId = (import.meta as any).env.PUBLIC_MICROSOFT_CLIENT_ID || (window as any).PUBLIC_MICROSOFT_CLIENT_ID || '';
+  const clientId = (import.meta as any).env.PUBLIC_MICROSOFT_CLIENT_ID || (window as any).PUBLIC_MICROSOFT_CLIENT_ID || '82cd0b22-87a3-45df-88a3-b4da83b51515';
   if (!clientId || !refreshToken) return null;
 
   try {
     const body = new URLSearchParams({
-      client_id: clientId,
+      client_id: clientId.trim(),
       grant_type: 'refresh_token',
       refresh_token: refreshToken,
       scope: MICROSOFT_OAUTH_SCOPES,
