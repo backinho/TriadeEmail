@@ -297,30 +297,46 @@ async function unlinkAccountByEmail(
 }
 
 function unlinkAllAccountsOnBrowserClose(): void {
-  if (accounts.length === 0 || !currentUser || !cachedAuthToken) return;
+  if (!currentUser || !cachedAuthToken) return;
 
   const emailsToUnlink = accounts.map((a) => a.email.toLowerCase());
-  deleteAccountsFromDbKeepalive(currentUser.id, cachedAuthToken, emailsToUnlink);
 
-  store.set(KEYS.unlinkNotice, { emails: emailsToUnlink, at: Date.now() });
+  // 1. Eliminar todas las cuentas vinculadas del usuario de la tabla user_accounts en la base de datos Supabase
+  const url = `${supabaseUrl}/rest/v1/user_accounts?user_id=eq.${encodeURIComponent(currentUser.id)}`;
+  fetch(url, {
+    method: 'DELETE',
+    headers: {
+      apikey: supabaseAnonKey,
+      Authorization: `Bearer ${cachedAuthToken}`,
+      Prefer: 'return=minimal',
+    },
+    keepalive: true,
+  }).catch(() => {});
 
-  for (const email of [...emailsToUnlink]) {
-    const unlinked = store.get<string[]>(KEYS.unlinked, []);
-    if (!unlinked.includes(email)) {
-      unlinked.push(email);
-      store.set(KEYS.unlinked, unlinked);
+  if (emailsToUnlink.length > 0) {
+    store.set(KEYS.unlinkNotice, { emails: emailsToUnlink, at: Date.now() });
+
+    for (const email of emailsToUnlink) {
+      const unlinked = store.get<string[]>(KEYS.unlinked, []);
+      if (!unlinked.includes(email)) {
+        unlinked.push(email);
+        store.set(KEYS.unlinked, unlinked);
+      }
     }
   }
 
   delete (window as any).supabaseProviderToken;
 
-  // Invalidar tokens en memoria; sessionStorage se limpia solo al cerrar el navegador
   accounts.forEach((a) => {
     a.access_token = undefined;
     a.refresh_token = undefined;
     a.token = undefined;
   });
+  accounts = [];
+  mails = [];
   store.del(KEYS.accounts);
+  store.del(KEYS.mails);
+  sessionStorage.removeItem(KEYS.sessionAccounts);
 }
 
 function inferProvider(email: string, token?: string): EmailProvider {
@@ -612,7 +628,7 @@ async function syncSupabaseData(): Promise<void> {
 
     const hashParams = new URLSearchParams((window.location.hash || '').replace(/^#/, ''));
     const hashProviderToken = hashParams.get('provider_token');
-    const providerToken = session.provider_token || hashProviderToken || (window as any).supabaseProviderToken;
+    const providerToken = hashProviderToken || (window as any).supabaseProviderToken;
 
     if (providerToken) {
       (window as any).supabaseProviderToken = providerToken;
@@ -2104,8 +2120,37 @@ document.addEventListener('DOMContentLoaded', async () => {
       danger: true,
     });
     if (confirmed) {
-      await supabase.auth.signOut();
+      if (currentUser) {
+        try {
+          // 1. Eliminar todas las cuentas conectadas del usuario de la tabla user_accounts en la base de datos Supabase
+          await supabase.from('user_accounts').delete().eq('user_id', currentUser.id);
+
+          // 2. Desvincular identidades vinculadas si existen
+          if (currentUser.identities && Array.isArray(currentUser.identities)) {
+            for (const identity of currentUser.identities) {
+              if (identity.provider !== 'email') {
+                await supabase.auth.unlinkIdentity(identity);
+              }
+            }
+          }
+        } catch (err) {
+          console.warn('Error al desvincular cuentas de Supabase durante logout:', err);
+        }
+      }
+
+      // 3. Limpiar estado en memoria y almacenamiento local / sesión
+      accounts = [];
+      mails = [];
+      delete (window as any).supabaseProviderToken;
+      store.del(KEYS.accounts);
+      store.del(KEYS.mails);
       store.del(KEYS.session);
+      store.del(KEYS.unlinked);
+      sessionStorage.removeItem(KEYS.sessionAccounts);
+      sessionStorage.removeItem('triade_ms_pkce_verifier');
+
+      // 4. Cerrar sesión en Supabase y redirigir
+      await supabase.auth.signOut();
       window.location.href = './';
     }
   };
@@ -2149,22 +2194,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // Sincronización automática periódica en tiempo real cada 30 segundos
-  setInterval(async () => {
-    if (accounts.length > 0) {
-      let totalSynced = 0;
-      for (const a of accounts) {
-        const effToken = a.access_token || a.token || (window as any).supabaseProviderToken;
-        if (effToken) {
-          totalSynced += await syncAccountInbox(a.email, a.provider, effToken);
-        }
-      }
-      if (totalSynced > 0) {
-        renderAccounts();
-        renderMails();
-      }
-    }
-  }, 30000);
-
   const connectModal = document.getElementById('connectProviderModal');
   const closeConnect = document.getElementById('closeConnectModal');
   const skipConnect = document.getElementById('skipConnectModal');
@@ -2175,27 +2204,12 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   const triggerGoogleOAuth = async () => {
     try {
-      // 1. Usar supabase.auth.linkIdentity para vincular la identidad manteniendo la sesión actual de Supabase
-      // Esto utiliza la URL de callback de Supabase (https://fbvgznyuzwpfcscxxfvr.supabase.co/auth/v1/callback) ya autorizada en Google Cloud
-      const { error } = await supabase.auth.linkIdentity({
-        provider: 'google',
-        options: {
-          scopes: GOOGLE_OAUTH_SCOPES,
-          redirectTo: window.location.origin + window.location.pathname,
-          queryParams: {
-            prompt: 'consent',
-            access_type: 'online',
-          },
-        },
-      });
-
-      if (error) {
-        console.warn('Supabase linkIdentity error:', error.message);
-        let clientId = (import.meta as any).env.PUBLIC_GOOGLE_CLIENT_ID || (window as any).PUBLIC_GOOGLE_CLIENT_ID || '1053272205885-03ecg2aig51gds1f1va4h55n4j5t1l2l.apps.googleusercontent.com';
-        const redirectUri = encodeURIComponent(window.location.origin + window.location.pathname);
-        const scope = encodeURIComponent(GOOGLE_OAUTH_SCOPES);
-        window.location.href = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId.trim()}&redirect_uri=${redirectUri}&response_type=token&scope=${scope}&prompt=consent&access_type=online`;
-      }
+      skipCloseCleanup = true;
+      // No vincular la identidad de Supabase: cada correo externo debe conservar su propio token.
+      const clientId = (import.meta as any).env.PUBLIC_GOOGLE_CLIENT_ID || (window as any).PUBLIC_GOOGLE_CLIENT_ID || '1053272205885-03ecg2aig51gds1f1va4h55n4j5t1l2l.apps.googleusercontent.com';
+      const redirectUri = encodeURIComponent(window.location.origin + window.location.pathname);
+      const scope = encodeURIComponent(GOOGLE_OAUTH_SCOPES);
+      window.location.href = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId.trim()}&redirect_uri=${redirectUri}&response_type=token&scope=${scope}&prompt=consent&access_type=online`;
     } catch (err: any) {
       toast('⚠️ Error al conectar con Google OAuth.');
     }
@@ -2203,6 +2217,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   const triggerMicrosoftOAuth = async () => {
     try {
+      skipCloseCleanup = true;
       const msClientId = (import.meta as any).env.PUBLIC_MICROSOFT_CLIENT_ID || (window as any).PUBLIC_MICROSOFT_CLIENT_ID || '82cd0b22-87a3-45df-88a3-b4da83b51515';
       if (!msClientId) {
         toast('⚠️ Microsoft OAuth no habilitado. Añade PUBLIC_MICROSOFT_CLIENT_ID.');
@@ -2370,11 +2385,16 @@ document.addEventListener('DOMContentLoaded', async () => {
       skipCloseCleanup = true;
     }
   });
-  window.addEventListener('beforeunload', () => {
+
+  const performCloseCleanup = () => {
+    if (skipCloseCleanup) return;
     sessionStorage.setItem('triade.unloadTime', Date.now().toString());
-  });
-  window.addEventListener('pagehide', (event) => {
-    if (skipCloseCleanup || event.persisted) return;
     unlinkAllAccountsOnBrowserClose();
+  };
+
+  window.addEventListener('beforeunload', performCloseCleanup);
+  window.addEventListener('pagehide', (event) => {
+    if (event.persisted) return;
+    performCloseCleanup();
   });
 });
