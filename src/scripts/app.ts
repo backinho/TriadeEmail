@@ -23,6 +23,9 @@ const GOOGLE_OAUTH_SCOPES = [
 ].join(' ');
 
 const MICROSOFT_OAUTH_SCOPES = [
+  'offline_access',
+  'openid',
+  'profile',
   'https://graph.microsoft.com/Mail.Read',
   'https://graph.microsoft.com/Mail.Send',
   'https://graph.microsoft.com/User.Read',
@@ -366,6 +369,21 @@ async function fetchGoogleUserEmail(accessToken: string): Promise<string | null>
   return null;
 }
 
+export function cleanUserEmail(rawEmail: string | null | undefined): string {
+  if (!rawEmail) return '';
+  const email = rawEmail.trim();
+  const lower = email.toLowerCase();
+  const extIndex = lower.indexOf('#ext#');
+  if (extIndex !== -1) {
+    const externalPart = email.substring(0, extIndex);
+    const lastUnderscore = externalPart.lastIndexOf('_');
+    if (lastUnderscore !== -1) {
+      return (externalPart.substring(0, lastUnderscore) + '@' + externalPart.substring(lastUnderscore + 1)).toLowerCase();
+    }
+  }
+  return lower;
+}
+
 async function fetchOutlookUserEmail(accessToken: string): Promise<string | null> {
   try {
     const res = await fetch('https://graph.microsoft.com/v1.0/me', {
@@ -373,7 +391,16 @@ async function fetchOutlookUserEmail(accessToken: string): Promise<string | null
     });
     if (res.ok) {
       const data = await res.json();
-      return data.mail || data.userPrincipalName || null;
+      let emailCandidate = data.mail;
+      if (!emailCandidate && Array.isArray(data.otherMails) && data.otherMails.length > 0) {
+        emailCandidate = data.otherMails[0];
+      }
+      if (!emailCandidate) {
+        emailCandidate = data.userPrincipalName;
+      }
+      if (emailCandidate) {
+        return cleanUserEmail(emailCandidate);
+      }
     }
   } catch (err) {
     console.warn('Could not fetch Outlook userinfo:', err);
@@ -381,67 +408,187 @@ async function fetchOutlookUserEmail(accessToken: string): Promise<string | null
   return null;
 }
 
-async function handleDirectOAuthRedirect(): Promise<boolean> {
-  const hash = window.location.hash || '';
-  if (!hash.includes('access_token=') && !hash.includes('provider_token=')) return false;
+async function refreshMicrosoftAccessToken(refreshToken: string): Promise<string | null> {
+  const clientId = (import.meta as any).env.PUBLIC_MICROSOFT_CLIENT_ID || (window as any).PUBLIC_MICROSOFT_CLIENT_ID || '';
+  if (!clientId || !refreshToken) return null;
 
-  const params = new URLSearchParams(hash.replace(/^#/, ''));
+  try {
+    const body = new URLSearchParams({
+      client_id: clientId,
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken,
+      scope: MICROSOFT_OAUTH_SCOPES,
+    });
+
+    const res = await fetch('https://login.microsoftonline.com/common/oauth2/v2.0/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      return data.access_token || null;
+    }
+  } catch (err) {
+    console.warn('Error refreshing Microsoft access token:', err);
+  }
+  return null;
+}
+
+function base64UrlEncode(value: ArrayBuffer): string {
+  const bytes = new Uint8Array(value);
+  let binary = '';
+  bytes.forEach((byte) => {
+    binary += String.fromCharCode(byte);
+  });
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+async function createMicrosoftPkceChallenge(): Promise<{ verifier: string; challenge: string }> {
+  const verifier = Array.from({ length: 64 }, () => 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~'[Math.floor(Math.random() * 64)]).join('');
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+  return { verifier, challenge: base64UrlEncode(digest) };
+}
+
+function getOAuthRedirectUri(): string {
+  const origin = window.location.origin.replace(/\/+$/, '');
+  let path = window.location.pathname.replace(/\/+$/, '');
+  if (!path) path = '/app';
+  return origin + path;
+}
+
+async function exchangeMicrosoftCodeForToken(code: string, verifier: string): Promise<{ access_token: string; refresh_token?: string } | null> {
+  const clientId = (import.meta as any).env.PUBLIC_MICROSOFT_CLIENT_ID || (window as any).PUBLIC_MICROSOFT_CLIENT_ID || '82cd0b22-87a3-45df-88a3-b4da83b51515';
+  if (!clientId) {
+    console.warn('PUBLIC_MICROSOFT_CLIENT_ID no definido.');
+    return null;
+  }
+
+  const redirectUri = getOAuthRedirectUri();
+  const body = new URLSearchParams({
+    client_id: clientId.trim(),
+    scope: MICROSOFT_OAUTH_SCOPES,
+    code,
+    redirect_uri: redirectUri,
+    grant_type: 'authorization_code',
+    code_verifier: verifier,
+  });
+
+  try {
+    const res = await fetch('https://login.microsoftonline.com/common/oauth2/v2.0/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      console.warn('Microsoft token exchange failed:', res.status, errText);
+      return null;
+    }
+
+    const data = await res.json();
+    return {
+      access_token: data.access_token || null,
+      refresh_token: data.refresh_token || undefined,
+    };
+  } catch (err) {
+    console.warn('Error exchanging Microsoft code for token:', err);
+    return null;
+  }
+}
+
+let isExchangingOAuthCode = false;
+
+async function handleDirectOAuthRedirect(): Promise<boolean> {
+  if (isExchangingOAuthCode) return false;
+
+  const hash = window.location.hash || '';
+  const search = window.location.search || '';
+  const params = new URLSearchParams((hash ? hash.replace(/^#/, '') : search.replace(/^\?/, '')));
+
   const providerToken = params.get('provider_token');
   const accessToken = params.get('access_token');
+  const code = params.get('code');
+  const savedVerifier = sessionStorage.getItem('triade_ms_pkce_verifier');
 
-  const tokenToUse = (providerToken && providerToken.startsWith('ya29'))
-    ? providerToken
-    : (accessToken && !accessToken.startsWith('eyJ'))
-      ? accessToken
-      : providerToken;
+  if (!providerToken && !accessToken && !code) return false;
 
-  if (!tokenToUse) return false;
+  isExchangingOAuthCode = true;
+  try {
+    let tokenToUse: string | null = providerToken || accessToken || null;
+    let refreshTokenToUse: string | undefined = undefined;
 
-  (window as any).supabaseProviderToken = tokenToUse;
-  let userEmail = await fetchGoogleUserEmail(tokenToUse);
-  if (!userEmail) userEmail = await fetchOutlookUserEmail(tokenToUse);
-
-  if (userEmail) {
-    history.replaceState(null, '', window.location.pathname);
-    // Remover de la lista de desvinculados explícitos si el usuario vuelve a vincular esta cuenta
-    const unlinked = store.get<string[]>(KEYS.unlinked, []).filter((e) => e.toLowerCase() !== userEmail!.toLowerCase());
-    store.set(KEYS.unlinked, unlinked);
-
-    const provider: EmailProvider = userEmail.includes('outlook') || userEmail.includes('hotmail') || userEmail.includes('live') ? 'outlook' : 'gmail';
-    const accIndex = accounts.findIndex((a) => a.email.toLowerCase() === userEmail!.toLowerCase());
-    if (accIndex !== -1) {
-      accounts[accIndex].token = tokenToUse;
-      accounts[accIndex].access_token = tokenToUse;
-      accounts[accIndex].status = 'connected';
-    } else {
-      accounts.push({
-        email: userEmail.toLowerCase(),
-        primary: accounts.length === 0,
-        provider,
-        status: 'connected',
-        token: tokenToUse,
-        access_token: tokenToUse,
-      });
+    if (!tokenToUse && code && savedVerifier) {
+      sessionStorage.removeItem('triade_ms_pkce_verifier');
+      history.replaceState(null, '', window.location.pathname);
+      const tokenResult = await exchangeMicrosoftCodeForToken(code, savedVerifier);
+      if (tokenResult) {
+        tokenToUse = tokenResult.access_token;
+        refreshTokenToUse = tokenResult.refresh_token;
+      }
+    } else if (code) {
+      history.replaceState(null, '', window.location.pathname);
     }
 
-    if (currentUser) {
-      await supabase.from('user_accounts').upsert({
-        user_id: currentUser.id,
-        email: userEmail.toLowerCase(),
-        access_token: tokenToUse,
-        is_primary: accounts.length === 1,
-      }, { onConflict: 'user_id,email' });
-    }
+    if (!tokenToUse) return false;
 
-    activeAccount = userEmail.toLowerCase();
-    const count = await syncAccountInbox(userEmail, provider, tokenToUse);
-    persist();
-    renderAccounts();
-    renderMails();
-    toast(`✔ Cuenta ${userEmail} conectada con ${provider === 'gmail' ? 'Google' : 'Microsoft'} OAuth (${count} correos).`);
-    return true;
+    (window as any).supabaseProviderToken = tokenToUse;
+    let userEmail = tokenToUse.startsWith('ya29')
+      ? await fetchGoogleUserEmail(tokenToUse)
+      : !tokenToUse.startsWith('eyJ')
+        ? await fetchOutlookUserEmail(tokenToUse)
+        : null;
+
+    if (userEmail) {
+      userEmail = cleanUserEmail(userEmail);
+      history.replaceState(null, '', window.location.pathname);
+      // Remover de la lista de desvinculados explícitos si el usuario vuelve a vincular esta cuenta
+      const unlinked = store.get<string[]>(KEYS.unlinked, []).filter((e) => e.toLowerCase() !== userEmail!.toLowerCase());
+      store.set(KEYS.unlinked, unlinked);
+
+      const provider: EmailProvider = (userEmail.includes('outlook') || userEmail.includes('hotmail') || userEmail.includes('live') || userEmail.includes('onmicrosoft.com')) ? 'outlook' : 'gmail';
+      const accIndex = accounts.findIndex((a) => a.email.toLowerCase() === userEmail!.toLowerCase());
+      if (accIndex !== -1) {
+        accounts[accIndex].token = tokenToUse;
+        accounts[accIndex].access_token = tokenToUse;
+        if (refreshTokenToUse) accounts[accIndex].refresh_token = refreshTokenToUse;
+        accounts[accIndex].status = 'connected';
+      } else {
+        accounts.push({
+          email: userEmail.toLowerCase(),
+          primary: accounts.length === 0,
+          provider,
+          status: 'connected',
+          token: tokenToUse,
+          access_token: tokenToUse,
+          refresh_token: refreshTokenToUse,
+        });
+      }
+
+      if (currentUser) {
+        await supabase.from('user_accounts').upsert({
+          user_id: currentUser.id,
+          email: userEmail.toLowerCase(),
+          access_token: tokenToUse,
+          refresh_token: refreshTokenToUse || null,
+          is_primary: accounts.length === 1,
+        }, { onConflict: 'user_id,email' });
+      }
+
+      activeAccount = userEmail.toLowerCase();
+      const count = await syncAccountInbox(userEmail, provider, tokenToUse);
+      persist();
+      renderAccounts();
+      renderMails();
+      toast(`✔ Cuenta ${userEmail} conectada con ${provider === 'gmail' ? 'Google' : 'Microsoft'} OAuth (${count} correos).`);
+      return true;
+    }
+    return false;
+  } finally {
+    isExchangingOAuthCode = false;
   }
-  return false;
 }
 
 async function syncSupabaseData(): Promise<void> {
@@ -497,18 +644,25 @@ async function syncSupabaseData(): Promise<void> {
     const { data: dbAccounts } = await supabase.from('user_accounts').select('*').eq('user_id', currentUser.id);
 
     if (dbAccounts !== null && dbAccounts.length > 0) {
-      const dbMapped = dbAccounts.map((a: any) => ({
-        id: a.id,
-        user_id: a.user_id,
-        email: a.email.toLowerCase(),
-        primary: a.is_primary,
-        provider: a.email.toLowerCase().includes('gmail') ? 'gmail' as EmailProvider : a.email.toLowerCase().includes('outlook') ? 'outlook' as EmailProvider : 'custom' as EmailProvider,
-        status: 'connected' as const,
-        access_token: a.access_token || undefined,
-        refresh_token: a.refresh_token || undefined,
-        expires_at: a.expires_at || undefined,
-        token: a.access_token || undefined,
-      }));
+      const dbMapped = dbAccounts.map((a: any) => {
+        const cleanE = cleanUserEmail(a.email);
+        if (cleanE !== a.email.toLowerCase() && currentUser) {
+          // Si el correo guardado en DB tenía la cadena sucia #ext#, eliminar la fila antigua en Supabase
+          supabase.from('user_accounts').delete().eq('id', a.id).then(() => {});
+        }
+        return {
+          id: a.id,
+          user_id: a.user_id,
+          email: cleanE,
+          primary: a.is_primary,
+          provider: (cleanE.includes('gmail') ? 'gmail' as EmailProvider : (cleanE.includes('outlook') || cleanE.includes('hotmail') || cleanE.includes('live') || cleanE.includes('onmicrosoft.com')) ? 'outlook' as EmailProvider : 'custom' as EmailProvider),
+          status: 'connected' as const,
+          access_token: a.access_token || undefined,
+          refresh_token: a.refresh_token || undefined,
+          expires_at: a.expires_at || undefined,
+          token: a.access_token || undefined,
+        };
+      });
 
       // Preferir tokens de sessionStorage (sesión activa) sobre los de la DB
       const sessionMap = new Map(accounts.map((a) => [a.email.toLowerCase(), a]));
@@ -531,14 +685,13 @@ async function syncSupabaseData(): Promise<void> {
     }
 
     // Si retornó un providerToken de OAuth, obtener el correo real de la API de Google/Microsoft (no usar el login email)
-    if (providerToken) {
-      let oauthEmail = await fetchGoogleUserEmail(providerToken);
-      if (!oauthEmail) {
-        oauthEmail = await fetchOutlookUserEmail(providerToken);
-      }
+    if (providerToken && !providerToken.startsWith('eyJ')) {
+      let oauthEmail = providerToken.startsWith('ya29')
+        ? await fetchGoogleUserEmail(providerToken)
+        : await fetchOutlookUserEmail(providerToken);
 
       if (oauthEmail) {
-        const cleanEmail = oauthEmail.toLowerCase().trim();
+        const cleanEmail = cleanUserEmail(oauthEmail);
         const unlinkedSet = new Set(store.get<string[]>(KEYS.unlinked, []));
 
         // Solo restaurar la cuenta si NO fue desvinculada explícitamente por el usuario
@@ -714,13 +867,13 @@ function escapeHtml(s: unknown): string {
 }
 
 async function syncAccountInbox(accountEmailRaw: string, forcedProvider?: EmailProvider, token?: string): Promise<number> {
-  const accountEmail = accountEmailRaw.trim().toLowerCase();
+  const accountEmail = cleanUserEmail(accountEmailRaw);
   if (!accountEmail || !accountEmail.includes('@')) return 0;
 
   let provider: EmailProvider = forcedProvider || 'custom';
   if (!forcedProvider || forcedProvider === 'custom') {
     if (accountEmail.includes('gmail.com')) provider = 'gmail';
-    else if (accountEmail.includes('outlook.com') || accountEmail.includes('hotmail.com') || accountEmail.includes('live.com')) provider = 'outlook';
+    else if (accountEmail.includes('outlook.com') || accountEmail.includes('hotmail.com') || accountEmail.includes('live.com') || accountEmail.includes('onmicrosoft.com')) provider = 'outlook';
   }
 
   const accIndex = accounts.findIndex((a) => a.email.toLowerCase() === accountEmail);
@@ -747,7 +900,32 @@ async function syncAccountInbox(accountEmailRaw: string, forcedProvider?: EmailP
   }
 
   const acc = accounts.find((a) => a.email.toLowerCase() === accountEmail);
-  const effectiveToken = token || acc?.access_token || acc?.token || (window as any).supabaseProviderToken;
+
+  let effectiveToken: string | null = null;
+  const candidates = [token, acc?.access_token, acc?.token, (window as any).supabaseProviderToken];
+  for (const cand of candidates) {
+    if (!cand || cand.startsWith('eyJ')) continue;
+    if (provider === 'gmail' && cand.startsWith('ya29')) {
+      effectiveToken = cand;
+      break;
+    }
+    if (provider === 'outlook') {
+      effectiveToken = cand;
+      break;
+    }
+  }
+
+  // Si es Outlook y no tenemos un token válido, intentar renovarlo si tenemos refresh_token
+  if (provider === 'outlook' && !effectiveToken && acc?.refresh_token) {
+    const newToken = await refreshMicrosoftAccessToken(acc.refresh_token);
+    if (newToken) {
+      effectiveToken = newToken;
+      acc.access_token = newToken;
+      acc.token = newToken;
+      (window as any).supabaseProviderToken = newToken;
+    }
+  }
+
   let liveMails: Mail[] = [];
 
   if (effectiveToken) {
@@ -755,14 +933,30 @@ async function syncAccountInbox(accountEmailRaw: string, forcedProvider?: EmailP
       if (provider === 'gmail') {
         liveMails = await fetchRealGmailMails(effectiveToken, accountEmail);
       } else if (provider === 'outlook') {
-        liveMails = await fetchRealOutlookMails(effectiveToken, accountEmail);
+        try {
+          liveMails = await fetchRealOutlookMails(effectiveToken, accountEmail);
+        } catch (err: any) {
+          if (acc?.refresh_token) {
+            const newToken = await refreshMicrosoftAccessToken(acc.refresh_token);
+            if (newToken) {
+              acc.access_token = newToken;
+              acc.token = newToken;
+              (window as any).supabaseProviderToken = newToken;
+              liveMails = await fetchRealOutlookMails(newToken, accountEmail);
+            } else {
+              throw err;
+            }
+          } else {
+            throw err;
+          }
+        }
       }
     } catch (err: any) {
       console.warn('Could not fetch live mails with token:', err);
-      toast(`⚠️ Error al conectar con ${provider === 'gmail' ? 'Gmail' : 'Outlook'} API: Token inválido o no configurado en Supabase.`);
+      toast(`⚠️ Error al conectar con ${provider === 'gmail' ? 'Gmail' : 'Outlook'} API (${accountEmail}): La sesión del correo ha expirado. Vuelve a vincular la cuenta.`);
     }
   } else {
-    toast(`⚠️ Se requiere un Token OAuth o API Key para extraer los correos en vivo de ${accountEmail}.`);
+    console.warn(`No active live token found for ${accountEmail} (${provider}).`);
   }
 
   let addedCount = 0;
@@ -1423,6 +1617,15 @@ async function sendMail(): Promise<void> {
       result = await sendRealGmailMail(effToken, f.to, f.subject || '(Sin asunto)', bodyContent);
     } else if (sendProvider === 'outlook') {
       result = await sendRealOutlookMail(effToken, f.to, f.subject || '(Sin asunto)', bodyContent);
+      if (!result.ok && result.code === 'expired_token' && targetAcc.refresh_token) {
+        const newToken = await refreshMicrosoftAccessToken(targetAcc.refresh_token);
+        if (newToken) {
+          targetAcc.access_token = newToken;
+          targetAcc.token = newToken;
+          (window as any).supabaseProviderToken = newToken;
+          result = await sendRealOutlookMail(newToken, f.to, f.subject || '(Sin asunto)', bodyContent);
+        }
+      }
     } else {
       toast(`⚠️ ${t('send_error_no_account')}`);
       return;
@@ -2000,29 +2203,30 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   const triggerMicrosoftOAuth = async () => {
     try {
-      const { error } = await supabase.auth.linkIdentity({
-        provider: 'azure',
-        options: {
-          scopes: MICROSOFT_OAUTH_SCOPES,
-          redirectTo: window.location.origin + window.location.pathname,
-          queryParams: { prompt: 'consent' },
-        },
-      });
-      if (error) {
-        const { error: signInErr } = await supabase.auth.signInWithOAuth({
-          provider: 'azure',
-          options: {
-            scopes: MICROSOFT_OAUTH_SCOPES,
-            redirectTo: window.location.origin + window.location.pathname,
-            queryParams: { prompt: 'consent' },
-          },
-        });
-        if (signInErr) {
-          toast('⚠️ Microsoft OAuth no habilitado en Supabase.');
-          console.warn('OAuth Microsoft Error:', signInErr.message);
-        }
+      const msClientId = (import.meta as any).env.PUBLIC_MICROSOFT_CLIENT_ID || (window as any).PUBLIC_MICROSOFT_CLIENT_ID || '82cd0b22-87a3-45df-88a3-b4da83b51515';
+      if (!msClientId) {
+        toast('⚠️ Microsoft OAuth no habilitado. Añade PUBLIC_MICROSOFT_CLIENT_ID.');
+        return;
       }
+
+      const { verifier, challenge } = await createMicrosoftPkceChallenge();
+      sessionStorage.setItem('triade_ms_pkce_verifier', verifier);
+
+      const params = new URLSearchParams({
+        client_id: msClientId.trim(),
+        response_type: 'code',
+        redirect_uri: getOAuthRedirectUri(),
+        response_mode: 'query',
+        scope: MICROSOFT_OAUTH_SCOPES,
+        prompt: 'consent',
+        state: crypto.randomUUID(),
+        code_challenge: challenge,
+        code_challenge_method: 'S256',
+      });
+
+      window.location.href = `https://login.microsoftonline.com/common/oauth2/v2.0/authorize?${params.toString()}`;
     } catch (err: any) {
+      console.error('Error al iniciar Microsoft OAuth:', err);
       toast('⚠️ Error al conectar con Microsoft OAuth.');
     }
   };
