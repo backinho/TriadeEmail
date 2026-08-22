@@ -86,6 +86,31 @@ import logoTypePositive from '../images/LOGOTIPO-POSITIVO.png';
   <section class="main glass">
     <div class="tabs" id="tabs"></div>
     <div class="mail-list" id="mailList"></div>
+    <div class="reader-view" id="readerModal" aria-hidden="true">
+      <div class="reader-window">
+        <div class="reader-head">
+          <button class="btn icon ghost" id="closeReader" title="Volver a la bandeja" aria-label="Volver a la bandeja">←</button>
+          <h3 id="readerSubject">—</h3>
+          <div class="reader-head-actions">
+            <button type="button" class="btn icon ghost" id="readerHeadStar" title="Destacar" aria-label="Destacar">☆</button>
+              <button type="button" class="btn icon ghost" id="readerHeadTrash" title="Mover a papelera" aria-label="Mover a papelera">⌫</button>
+          </div>
+        </div>
+        <div class="reader-meta">
+          <div class="avatar" id="readerAvatar" style="width:40px;height:40px">?</div>
+          <div style="min-width:0;flex:1">
+            <div class="from-name" id="readerFromName">—</div>
+            <div class="from-email" id="readerFromEmail">—</div>
+          </div>
+          <div class="time" id="readerTime">—</div>
+        </div>
+        <div class="reader-body" id="readerBody">—</div>
+        <div class="reader-actions">
+          <button class="btn primary" id="readerReply" data-i18n="reply">Responder</button>
+          <button class="btn" id="readerForward" data-i18n="forward">Reenviar</button>
+        </div>
+      </div>
+    </div>
   </section>
 </div>
 
@@ -183,31 +208,6 @@ import logoTypePositive from '../images/LOGOTIPO-POSITIVO.png';
       <button class="btn" id="saveDraft" data-i18n="save_draft">Guardar borrador</button>
       <button class="btn ghost" id="discardMail" data-i18n="discard">Descartar</button>
       <span class="compose-status" id="composeStatus"></span>
-    </div>
-  </div>
-</div>
-
-<!-- MAIL READER MODAL -->
-<div class="reader-backdrop" id="readerModal">
-  <div class="reader-window glass glass-strong">
-    <div class="reader-head">
-      <h3 id="readerSubject">—</h3>
-      <button class="btn icon ghost" id="closeReader" title="Cerrar">✕</button>
-    </div>
-    <div class="reader-meta">
-      <div class="avatar" id="readerAvatar" style="width:40px;height:40px">?</div>
-      <div style="min-width:0;flex:1">
-        <div class="from-name" id="readerFromName">—</div>
-        <div class="from-email" id="readerFromEmail">—</div>
-      </div>
-      <div class="time" id="readerTime">—</div>
-    </div>
-    <div class="reader-body" id="readerBody">—</div>
-    <div class="reader-actions">
-      <button class="btn primary" id="readerReply" data-i18n="reply">Responder</button>
-      <button class="btn" id="readerForward" data-i18n="forward">Reenviar</button>
-      <button class="btn ghost" id="readerStar">☆</button>
-      <button class="btn ghost" id="readerTrash" data-i18n="move_trash">A papelera</button>
     </div>
   </div>
 </div>

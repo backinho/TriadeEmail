@@ -7,6 +7,34 @@ export type SendResult =
   | { ok: true }
   | { ok: false; status?: number; code?: string; message: string };
 
+export async function updateRealMail(
+  provider: 'gmail' | 'outlook',
+  accessToken: string,
+  messageId: string,
+  action: 'star' | 'unstar' | 'trash'
+): Promise<boolean> {
+  try {
+    const url = provider === 'gmail'
+      ? `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(messageId)}/modify`
+      : action === 'trash'
+        ? `https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(messageId)}/move`
+        : `https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(messageId)}`;
+    const body = provider === 'gmail'
+      ? { addLabelIds: action === 'star' ? ['STARRED'] : action === 'trash' ? ['TRASH'] : [], removeLabelIds: action === 'unstar' ? ['STARRED'] : [] }
+      : action === 'trash'
+        ? { destinationId: 'deleteditems' }
+        : { flag: { flagStatus: action === 'star' ? 'flagged' : 'notFlagged' } };
+    const res = await fetch(url, {
+      method: provider === 'gmail' || action === 'trash' ? 'POST' : 'PATCH',
+      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 function toBase64Url(str: string): string {
   const bytes = new TextEncoder().encode(str);
   let binary = '';

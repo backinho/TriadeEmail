@@ -3,7 +3,7 @@ import {
   type Account, type Category, type Profile, type Mail, type Attachment, type Folder, type EmailProvider,
 } from './common';
 import { supabase, supabaseUrl, supabaseAnonKey } from './supabase';
-import { fetchRealGmailMails, fetchRealOutlookMails, sendRealGmailMail, sendRealOutlookMail, type SendResult } from './emailApi';
+import { fetchRealGmailMails, fetchRealOutlookMails, sendRealGmailMail, sendRealOutlookMail, updateRealMail, type SendResult } from './emailApi';
 
 
 // ---------- Defaults ----------
@@ -17,7 +17,7 @@ const DEFAULT_PROFILE: Profile = {
 };
 
 const GOOGLE_OAUTH_SCOPES = [
-  'https://www.googleapis.com/auth/gmail.readonly',
+  'https://www.googleapis.com/auth/gmail.modify',
   'https://www.googleapis.com/auth/gmail.send',
   'https://www.googleapis.com/auth/userinfo.email',
 ].join(' ');
@@ -1773,6 +1773,7 @@ function discardCompose(): void {
 // ---------- Reader ----------
 function openReader(m: Mail): void {
   const modal = document.getElementById('readerModal')!;
+  const main = document.querySelector<HTMLElement>('.main')!;
   document.getElementById('readerSubject')!.textContent = repairMojibake(m.subject || '(sin asunto)');
   document.getElementById('readerFromName')!.textContent = repairMojibake(m.from || '—');
   document.getElementById('readerFromEmail')!.textContent = repairMojibake(m.fromEmail || m.to || '');
@@ -1792,23 +1793,43 @@ function openReader(m: Mail): void {
       '</div></div>';
   }
   body.innerHTML = html;
-  const starBtn = document.getElementById('readerStar')!;
-  starBtn.textContent = m.starred ? '★' : '☆';
-  starBtn.onclick = () => {
-    m.starred = !m.starred;
+  const headStarBtn = document.getElementById('readerHeadStar')!;
+  const toggleStar = () => {
+    const nextStarred = !m.starred;
+    const account = accounts.find((item) => item.email.toLowerCase() === m.account.toLowerCase());
+    const token = account?.access_token || account?.token;
+    m.starred = nextStarred;
+    headStarBtn.textContent = m.starred ? '★' : '☆';
     persist();
-    starBtn.textContent = m.starred ? '★' : '☆';
-    renderMails();
+    updateFolderCounts();
+    if (account?.provider && token) {
+      void updateRealMail(account.provider, token, m.id, nextStarred ? 'star' : 'unstar').then((updated) => {
+        if (!updated) {
+        toast('No se pudo actualizar el favorito en el proveedor de correo.');
+        }
+      });
+    }
   };
-  document.getElementById('readerTrash')!.onclick = () => {
+  headStarBtn.textContent = m.starred ? '★' : '☆';
+  headStarBtn.onclick = toggleStar;
+  const moveToTrash = () => {
+    const account = accounts.find((item) => item.email.toLowerCase() === m.account.toLowerCase());
+    const token = account?.access_token || account?.token;
     m.folder = 'trash';
     m.starred = false;
     persist();
-    renderMails();
-    modal.classList.remove('open');
+    closeReaderView();
+    if (account?.provider && token) {
+      void updateRealMail(account.provider, token, m.id, 'trash').then((updated) => {
+        if (!updated) {
+        toast('No se pudo enviar el correo a la papelera.');
+        }
+      });
+    }
   };
+  document.getElementById('readerHeadTrash')!.onclick = moveToTrash;
   document.getElementById('readerReply')!.onclick = () => {
-    modal.classList.remove('open');
+    closeReaderView();
     openCompose({
       to: m.fromEmail || m.from,
       subject: 'Re: ' + (m.subject || ''),
@@ -1819,7 +1840,7 @@ function openReader(m: Mail): void {
     });
   };
   document.getElementById('readerForward')!.onclick = () => {
-    modal.classList.remove('open');
+    closeReaderView();
     openCompose({
       to: '',
       subject: 'Fwd: ' + (m.subject || ''),
@@ -1828,6 +1849,17 @@ function openReader(m: Mail): void {
     });
   };
   modal.classList.add('open');
+  modal.setAttribute('aria-hidden', 'false');
+  main.classList.add('reader-open');
+}
+
+function closeReaderView(): void {
+  const modal = document.getElementById('readerModal');
+  const main = document.querySelector<HTMLElement>('.main');
+  modal?.classList.remove('open');
+  modal?.setAttribute('aria-hidden', 'true');
+  main?.classList.remove('reader-open');
+  renderMails();
 }
 
 function sanitizeEmailHtml(html: string): string {
@@ -1929,6 +1961,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   document.querySelectorAll<HTMLElement>('.sidebar .nav-item[data-folder]').forEach((n) => {
     n.onclick = () => {
+      closeReaderView();
       document.querySelectorAll('.sidebar .nav-item[data-folder]').forEach((x) => x.classList.remove('active'));
       n.classList.add('active');
       activeFolder = n.dataset.folder!;
@@ -2118,12 +2151,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     schedulePop.classList.remove('open');
   };
 
-  document.getElementById('closeReader')!.onclick = () =>
-    document.getElementById('readerModal')!.classList.remove('open');
-  document.getElementById('readerModal')!.addEventListener('click', (e) => {
-    if ((e.target as HTMLElement).id === 'readerModal')
-      (e.currentTarget as HTMLElement).classList.remove('open');
-  });
+  document.getElementById('closeReader')!.onclick = closeReaderView;
 
   const userAvatar = document.getElementById('userAvatar')!;
   const userMenu = document.getElementById('userMenu')!;
@@ -2394,7 +2422,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
       document.getElementById('composeModal')!.classList.remove('open');
       document.getElementById('settingsModal')!.classList.remove('open');
-      document.getElementById('readerModal')!.classList.remove('open');
+      closeReaderView();
       document.getElementById('linkModal')!.classList.remove('open');
       document.getElementById('emojiPop')!.classList.remove('open');
       document.getElementById('schedulePop')!.classList.remove('open');
