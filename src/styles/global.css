@@ -650,7 +650,7 @@ body{
   display:none; align-items:center; justify-content:center; z-index:56; padding:1rem;
 }
 .reader-backdrop.open{ display:flex }
-.reader-window{ width:min(900px,100%); height:min(720px,92vh); display:flex; flex-direction:column; overflow:hidden }
+.reader-window{ width:min(980px,100%); height:min(760px,94vh); display:flex; flex-direction:column; overflow:hidden; background:var(--bg-1) }
 .reader-head{
   display:flex; align-items:center; justify-content:space-between; gap:.6rem;
   padding:1rem 1.25rem; border-bottom:1px solid var(--border); flex-shrink:0;
@@ -666,10 +666,20 @@ body{
 .reader-meta .time{ margin-left:auto; color:var(--fg-mute); font-size:.85rem }
 .reader-body{
   flex:1; min-height:0;
-  padding:1.25rem 1.5rem; overflow:auto; line-height:1.65; color:var(--fg);
-  white-space:pre-wrap; word-wrap:break-word; font-size:.95rem;
+  margin:.9rem 1.1rem; padding:clamp(1.2rem, 3vw, 2.4rem);
+  overflow:auto; line-height:1.65; color:var(--fg); background:var(--card-strong);
+  border:1px solid var(--border); border-radius:14px; word-wrap:break-word; font-size:.98rem;
+  white-space:normal; overflow-wrap:anywhere;
 }
-.reader-body img{ max-width:100%; border-radius:8px }
+.reader-body > :first-child{ margin-top:0 }
+.reader-body > :last-child{ margin-bottom:0 }
+.reader-body p{ margin:0 0 1rem }
+.reader-body h1,.reader-body h2,.reader-body h3{ line-height:1.25; margin:1.35rem 0 .7rem; color:var(--fg) }
+.reader-body a{ color:var(--accent); text-decoration:underline; text-underline-offset:2px }
+.reader-body img{ max-width:100%; height:auto; border-radius:8px }
+.reader-body table{ max-width:100%; border-collapse:collapse; overflow:auto; display:block }
+.reader-body blockquote{ margin:1rem 0; padding:.2rem 1rem; border-left:3px solid var(--accent); color:var(--fg-dim) }
+.reader-body pre{ max-width:100%; overflow:auto; padding:1rem; border-radius:8px; background:rgba(0,0,0,.18); white-space:pre-wrap }
 .reader-actions{
   display:flex; gap:.4rem; padding:.75rem 1.1rem;
   border-top:1px solid var(--border); flex-wrap:wrap;

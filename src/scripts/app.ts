@@ -1773,13 +1773,16 @@ function discardCompose(): void {
 // ---------- Reader ----------
 function openReader(m: Mail): void {
   const modal = document.getElementById('readerModal')!;
-  document.getElementById('readerSubject')!.textContent = m.subject || '(sin asunto)';
-  document.getElementById('readerFromName')!.textContent = m.from || '—';
-  document.getElementById('readerFromEmail')!.textContent = m.fromEmail || m.to || '';
+  document.getElementById('readerSubject')!.textContent = repairMojibake(m.subject || '(sin asunto)');
+  document.getElementById('readerFromName')!.textContent = repairMojibake(m.from || '—');
+  document.getElementById('readerFromEmail')!.textContent = repairMojibake(m.fromEmail || m.to || '');
   document.getElementById('readerTime')!.textContent = m.time || '';
-  document.getElementById('readerAvatar')!.textContent = (m.from || '?').charAt(0).toUpperCase();
+  document.getElementById('readerAvatar')!.textContent = repairMojibake(m.from || '?').charAt(0).toUpperCase();
   const body = document.getElementById('readerBody')!;
-  let html = m.bodyHtml || escapeHtml(m.body || '');
+  const bodyText = repairMojibake(m.body || '');
+  let html = m.bodyHtml
+    ? sanitizeEmailHtml(repairMojibake(m.bodyHtml))
+    : escapeHtml(bodyText).replace(/\r?\n/g, '<br>');
   if (m.attachments && m.attachments.length) {
     html +=
       '<div style="margin-top:1rem;padding-top:.8rem;border-top:1px solid var(--border)"><b>' +
@@ -1825,6 +1828,27 @@ function openReader(m: Mail): void {
     });
   };
   modal.classList.add('open');
+}
+
+function sanitizeEmailHtml(html: string): string {
+  const documentFragment = new DOMParser().parseFromString(html, 'text/html');
+  documentFragment.querySelectorAll('script, iframe, object, embed, form, link, meta, style').forEach((element) => element.remove());
+  documentFragment.querySelectorAll('*').forEach((element) => {
+    [...element.attributes].forEach((attribute) => {
+      if (attribute.name.toLowerCase().startsWith('on')) element.removeAttribute(attribute.name);
+      if ((attribute.name === 'href' || attribute.name === 'src') && /^(javascript|data):/i.test(attribute.value)) {
+        element.removeAttribute(attribute.name);
+      }
+    });
+  });
+  return documentFragment.body.innerHTML;
+}
+
+function repairMojibake(value: string): string {
+  if (!/(?:Ã.|Â.|â.)/.test(value)) return value;
+  const bytes = Uint8Array.from(value, (character) => character.charCodeAt(0) & 0xff);
+  const repaired = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+  return repaired.includes('�') ? value : repaired;
 }
 
 // ---------- Sidebar / mobile ----------

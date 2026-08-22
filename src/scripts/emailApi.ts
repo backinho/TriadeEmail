@@ -22,6 +22,13 @@ function encodeMimeSubject(subject: string): string {
   return `=?UTF-8?B?${btoa(binary)}?=`;
 }
 
+function decodeBase64Utf8(data: string): string {
+  const normalized = data.replace(/-/g, '+').replace(/_/g, '/');
+  const binary = atob(normalized + '='.repeat((4 - (normalized.length % 4)) % 4));
+  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+  return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+}
+
 function parseApiError(status: number, errText: string): string {
   try {
     const data = JSON.parse(errText);
@@ -60,7 +67,7 @@ function extractGmailBody(payload: any): { text: string; html: string } {
 
   if (payload.body?.data) {
     try {
-      const decoded = atob(payload.body.data.replace(/-/g, '+').replace(/_/g, '/'));
+      const decoded = decodeBase64Utf8(payload.body.data);
       if (payload.mimeType === 'text/html') {
         html = decoded;
       } else {
