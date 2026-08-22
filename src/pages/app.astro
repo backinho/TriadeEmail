@@ -114,6 +114,16 @@ import logoTypePositive from '../images/LOGOTIPO-POSITIVO.png';
   </section>
 </div>
 
+<div class="attachment-preview-backdrop" id="attachmentPreviewModal" role="dialog" aria-modal="true" aria-labelledby="attachmentPreviewTitle" aria-hidden="true">
+  <div class="attachment-preview-window glass glass-strong">
+    <div class="attachment-preview-head">
+      <h3 id="attachmentPreviewTitle">Vista previa</h3>
+      <button class="btn icon ghost" id="closeAttachmentPreview" title="Cerrar" aria-label="Cerrar">✕</button>
+    </div>
+    <div class="attachment-preview-content" id="attachmentPreviewContent"></div>
+  </div>
+</div>
+
 <!-- COMPOSE MODAL -->
 <div class="compose-backdrop" id="composeModal">
   <div class="compose-window glass glass-strong">
@@ -251,9 +261,6 @@ import logoTypePositive from '../images/LOGOTIPO-POSITIVO.png';
     </div>
   </div>
 </div>
-
-<!-- TOAST -->
-<div class="toast" id="toast"></div>
 
 <!-- SETTINGS MODAL -->
 <div class="modal-backdrop" id="settingsModal">

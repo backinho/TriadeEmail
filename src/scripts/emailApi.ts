@@ -1,4 +1,4 @@
-import type { Mail, Folder } from './common';
+import type { Mail, Folder, Attachment } from './common';
 
 const uid = (p = 'm'): string =>
   p + '_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-3);
@@ -48,6 +48,26 @@ function encodeMimeSubject(subject: string): string {
   let binary = '';
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return `=?UTF-8?B?${btoa(binary)}?=`;
+}
+
+function dataUrlParts(dataUrl: string): { type: string; base64: string } | null {
+  const match = dataUrl.match(/^data:([^;,]+)?;base64,(.+)$/);
+  return match ? { type: match[1] || 'application/octet-stream', base64: match[2] } : null;
+}
+
+function bodyBase64Placeholder(value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function wrapBase64(value: string): string {
+  return value.replace(/.{1,76}/g, '$&\r\n').trimEnd();
+}
+
+function encodeMimeHeader(value: string): string {
+  return /^[\x20-\x7E]*$/.test(value) ? value : encodeMimeSubject(value);
 }
 
 function decodeBase64Utf8(data: string): string {
@@ -117,6 +137,56 @@ function extractGmailBody(payload: any): { text: string; html: string } {
   return { text, html };
 }
 
+function collectGmailAttachments(payload: any, result: any[] = []): any[] {
+  if (!payload) return result;
+  if (payload.filename && (payload.body?.attachmentId || payload.body?.data)) {
+    result.push({
+      name: payload.filename,
+      size: Number(payload.body.size) || 0,
+      type: payload.mimeType || 'application/octet-stream',
+      attachmentId: payload.body.attachmentId,
+      data: payload.body.data,
+    });
+  }
+  for (const part of payload.parts || []) collectGmailAttachments(part, result);
+  return result;
+}
+
+async function loadGmailAttachments(
+  accessToken: string,
+  messageId: string,
+  payload: any,
+): Promise<Attachment[]> {
+  const attachments = collectGmailAttachments(payload);
+  const loaded: Attachment[] = [];
+  for (const attachment of attachments) {
+    try {
+      let base64 = String(attachment.data || '');
+      if (!base64 && attachment.attachmentId) {
+        const response = await fetch(
+          `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachment.attachmentId)}`,
+          { headers: { Authorization: `Bearer ${accessToken}` } },
+        );
+        if (!response.ok) continue;
+        const data = await response.json();
+        base64 = String(data.data || '');
+      }
+      base64 = base64.replace(/-/g, '+').replace(/_/g, '/');
+      if (base64) {
+        loaded.push({
+          name: attachment.name,
+          size: attachment.size,
+          type: attachment.type,
+          data: `data:${attachment.type};base64,${base64}`,
+        });
+      }
+    } catch {
+      // Keep the message available when one attachment cannot be downloaded.
+    }
+  }
+  return loaded;
+}
+
 /**
  * Send email in real-time via Google Gmail API
  */
@@ -124,7 +194,8 @@ export async function sendRealGmailMail(
   accessToken: string,
   to: string,
   subject: string,
-  bodyHtmlOrText: string
+  bodyHtmlOrText: string,
+  attachments: Attachment[] = []
 ): Promise<SendResult> {
   try {
     if (!accessToken.startsWith('ya29')) {
@@ -141,19 +212,34 @@ export async function sendRealGmailMail(
     }
 
     const safeBody = bodyHtmlOrText || '<p></p>';
-    const bodyBytes = new TextEncoder().encode(safeBody);
-    let bodyBinary = '';
-    for (const byte of bodyBytes) bodyBinary += String.fromCharCode(byte);
-    const bodyBase64 = btoa(bodyBinary);
+    const usableAttachments = attachments
+      .map((attachment) => ({ attachment, parts: attachment.data ? dataUrlParts(attachment.data) : null }))
+      .filter((item): item is { attachment: Attachment; parts: { type: string; base64: string } } => !!item.parts);
+    const boundary = `triade_${Date.now().toString(36)}`;
+    const mimeBody = [
+      `--${boundary}`,
+      'Content-Type: text/html; charset=UTF-8',
+      'Content-Transfer-Encoding: base64',
+      '',
+      wrapBase64(bodyBase64Placeholder(safeBody)),
+      ...usableAttachments.flatMap(({ attachment, parts }) => [
+        `--${boundary}`,
+        `Content-Type: ${parts.type}; name="${encodeMimeHeader(attachment.name)}"`,
+        `Content-Disposition: attachment; filename="${encodeMimeHeader(attachment.name)}"`,
+        'Content-Transfer-Encoding: base64',
+        '',
+        wrapBase64(parts.base64),
+      ]),
+      `--${boundary}--`,
+    ].join('\r\n');
 
     const rawMessage = [
       `To: ${to}`,
       `Subject: ${encodeMimeSubject(subject || '(Sin asunto)')}`,
       'MIME-Version: 1.0',
-      'Content-Type: text/html; charset=UTF-8',
-      'Content-Transfer-Encoding: base64',
+      `Content-Type: multipart/mixed; boundary="${boundary}"`,
       '',
-      bodyBase64,
+      mimeBody,
     ].join('\r\n');
 
     const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
@@ -191,7 +277,8 @@ export async function sendRealOutlookMail(
   accessToken: string,
   to: string,
   subject: string,
-  bodyHtmlOrText: string
+  bodyHtmlOrText: string,
+  attachments: Attachment[] = []
 ): Promise<SendResult> {
   try {
     if (!accessToken || !accessToken.trim()) {
@@ -216,6 +303,17 @@ export async function sendRealOutlookMail(
               emailAddress: { address: to },
             },
           ],
+          attachments: attachments
+            .filter((attachment) => attachment.data && dataUrlParts(attachment.data))
+            .map((attachment) => {
+              const parts = dataUrlParts(attachment.data!);
+              return {
+                '@odata.type': '#microsoft.graph.fileAttachment',
+                name: attachment.name,
+                contentType: parts!.type,
+                contentBytes: parts!.base64,
+              };
+            }),
         },
         saveToSentItems: true,
       }),
@@ -329,6 +427,7 @@ export async function fetchRealGmailMails(accessToken: string, accountEmail: str
         }
 
         const { text: bodyText, html: bodyHtml } = extractGmailBody(msg.payload);
+        const attachments = await loadGmailAttachments(accessToken, item.id, msg.payload);
         const finalBodyText = bodyText || snippet || '(Sin contenido)';
         const finalBodyHtml = bodyHtml || undefined;
 
@@ -346,6 +445,7 @@ export async function fetchRealGmailMails(accessToken: string, accountEmail: str
           unread: isUnread,
           starred: isStarred,
           folder: folder,
+          attachments,
         });
       } catch (err) {
         console.warn(`Failed to parse Gmail message ${item.id}:`, err);
@@ -367,7 +467,7 @@ export async function fetchRealGmailMails(accessToken: string, accountEmail: str
 export async function fetchRealOutlookMails(accessToken: string, accountEmail: string): Promise<Mail[]> {
   try {
     const res = await fetch(
-      'https://graph.microsoft.com/v1.0/me/messages?$top=50&$select=id,subject,bodyPreview,body,from,toRecipients,receivedDateTime,sentDateTime,isRead,flag',
+      'https://graph.microsoft.com/v1.0/me/messages?$top=50&$expand=attachments($select=name,contentType,size,contentBytes,isInline)&$select=id,subject,bodyPreview,body,from,toRecipients,receivedDateTime,sentDateTime,isRead,flag,attachments',
       {
         headers: { Authorization: `Bearer ${accessToken}` },
       }
@@ -392,6 +492,14 @@ export async function fetchRealOutlookMails(accessToken: string, accountEmail: s
         : dateObj.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
       const isSent = senderEmail.toLowerCase() === accountEmail.toLowerCase();
+      const attachments: Attachment[] = (m.attachments || [])
+        .filter((attachment: any) => !attachment.isInline && attachment.contentBytes)
+        .map((attachment: any) => ({
+          name: attachment.name || 'Adjunto',
+          size: Number(attachment.size) || 0,
+          type: attachment.contentType || 'application/octet-stream',
+          data: `data:${attachment.contentType || 'application/octet-stream'};base64,${attachment.contentBytes}`,
+        }));
 
       const timestampNum = !isNaN(dateObj.getTime()) ? dateObj.getTime() : Date.now();
 
@@ -409,6 +517,7 @@ export async function fetchRealOutlookMails(accessToken: string, accountEmail: s
         unread: !m.isRead,
         starred: m.flag?.flagStatus === 'flagged',
         folder: isSent ? ('sent' as Folder) : ('inbox' as Folder),
+        attachments,
       };
     });
 

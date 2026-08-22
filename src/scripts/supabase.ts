@@ -17,8 +17,7 @@ export const supabase = createClient(url, anonKey, {
   auth: {
     persistSession: true,
     autoRefreshToken: true,
-    // Los tokens de las cuentas de correo llegan directamente a /app y no son sesiones de Triade.
-    detectSessionInUrl: false,
+    detectSessionInUrl: true,
   },
 });
 

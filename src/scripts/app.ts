@@ -4,6 +4,7 @@ import {
 } from './common';
 import { supabase, supabaseUrl, supabaseAnonKey } from './supabase';
 import { fetchRealGmailMails, fetchRealOutlookMails, sendRealGmailMail, sendRealOutlookMail, updateRealMail, type SendResult } from './emailApi';
+import { toast } from './notifications';
 
 
 // ---------- Defaults ----------
@@ -112,6 +113,7 @@ const persist = (): void => {
     unread: m.unread,
     starred: m.starred,
     folder: m.folder,
+    attachments: m.attachments,
   }));
   store.set(KEYS.mails, lightMails);
 
@@ -1412,16 +1414,6 @@ function hydrateAppearance(): void {
   (document.getElementById('customColor') as HTMLInputElement).value = accent;
 }
 
-// ---------- Toast ----------
-let toastTimer: ReturnType<typeof setTimeout> | undefined;
-function toast(msg: string, duration = 2200): void {
-  const el = document.getElementById('toast')!;
-  el.textContent = msg;
-  el.classList.add('show');
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove('show'), duration);
-}
-
 // ---------- Confirm modal ----------
 type ConfirmOptions = {
   title?: string;
@@ -1481,6 +1473,7 @@ function showConfirm(opts: ConfirmOptions): Promise<boolean> {
 // ---------- Compose ----------
 let composingDraftId: string | null = null;
 let composeAttachments: Attachment[] = [];
+let pendingAttachmentReads: Promise<void>[] = [];
 let scheduledFor: string | null = null;
 
 type DraftLike = Partial<Mail> & { id?: string };
@@ -1523,6 +1516,7 @@ function openCompose(draft?: DraftLike): void {
   const modal = document.getElementById('composeModal')!;
   composingDraftId = draft?.id ?? null;
   composeAttachments = draft?.attachments ? [...draft.attachments] : [];
+  pendingAttachmentReads = [];
   scheduledFor = draft?.scheduledFor ?? null;
   populateComposeFromSelect();
   if (draft?.account && accounts.some((a) => a.email === draft.account)) {
@@ -1545,6 +1539,7 @@ function closeCompose(): void {
   document.getElementById('schedulePop')!.classList.remove('open');
   composingDraftId = null;
   composeAttachments = [];
+  pendingAttachmentReads = [];
   scheduledFor = null;
 }
 
@@ -1560,9 +1555,12 @@ function renderAttachments(): void {
   const wrap = document.getElementById('attachList')!;
   wrap.innerHTML = '';
   composeAttachments.forEach((a, i) => {
-    const el = document.createElement('span');
+    const el = document.createElement('div');
     el.className = 'attach-item';
-    el.innerHTML = `📎 ${escapeHtml(a.name)} <span class="kb">${a.size ? Math.round(a.size / 1024) + ' KB' : ''}</span> <button title="remove">✕</button>`;
+    const preview = a.data && a.type.startsWith('image/')
+      ? `<img class="attach-preview" src="${escapeAttr(a.data)}" alt="" />`
+      : `<span class="attach-icon">${a.type === 'application/pdf' ? 'PDF' : '📎'}</span>`;
+    el.innerHTML = `${preview}<span class="attach-meta"><b>${escapeHtml(a.name)}</b><span class="kb">${a.size ? Math.round(a.size / 1024) + ' KB' : 'Enlace'}</span></span><button title="remove" aria-label="Quitar adjunto">✕</button>`;
     el.querySelector('button')!.onclick = () => {
       composeAttachments.splice(i, 1);
       renderAttachments();
@@ -1582,6 +1580,11 @@ function readComposeFields(): { to: string; subject: string; bodyHtml: string; b
 }
 
 async function sendMail(): Promise<void> {
+  if (pendingAttachmentReads.length) {
+    await Promise.all(pendingAttachmentReads);
+    pendingAttachmentReads = [];
+    renderAttachments();
+  }
   const f = readComposeFields();
   if (!f.to) {
     document.getElementById('composeTo')!.focus();
@@ -1630,16 +1633,16 @@ async function sendMail(): Promise<void> {
     toast(`📤 Enviando correo vía ${providerLabel}…`);
     let result: SendResult;
     if (sendProvider === 'gmail') {
-      result = await sendRealGmailMail(effToken, f.to, f.subject || '(Sin asunto)', bodyContent);
+      result = await sendRealGmailMail(effToken, f.to, f.subject || '(Sin asunto)', bodyContent, composeAttachments);
     } else if (sendProvider === 'outlook') {
-      result = await sendRealOutlookMail(effToken, f.to, f.subject || '(Sin asunto)', bodyContent);
+      result = await sendRealOutlookMail(effToken, f.to, f.subject || '(Sin asunto)', bodyContent, composeAttachments);
       if (!result.ok && result.code === 'expired_token' && targetAcc.refresh_token) {
         const newToken = await refreshMicrosoftAccessToken(targetAcc.refresh_token);
         if (newToken) {
           targetAcc.access_token = newToken;
           targetAcc.token = newToken;
           (window as any).supabaseProviderToken = newToken;
-          result = await sendRealOutlookMail(newToken, f.to, f.subject || '(Sin asunto)', bodyContent);
+          result = await sendRealOutlookMail(newToken, f.to, f.subject || '(Sin asunto)', bodyContent, composeAttachments);
         }
       }
     } else {
@@ -1705,8 +1708,24 @@ async function sendMail(): Promise<void> {
       unread: false,
       starred: false,
       time_label: newMailObj.time,
-    }).then(({ error }) => {
-      if (error) console.warn('Error al guardar correo enviado en Supabase:', error);
+    }).select('id').single().then(async ({ data: savedMail, error }) => {
+      if (error) {
+        console.warn('Error al guardar correo enviado en Supabase:', error);
+        return;
+      }
+      const storedAttachments = newMailObj.attachments?.filter((attachment) => attachment.url);
+      if (savedMail?.id && storedAttachments?.length) {
+        const { error: attachmentError } = await supabase.from('attachments').insert(
+          storedAttachments.map((attachment) => ({
+            mail_id: savedMail.id,
+            name: attachment.name,
+            size: attachment.size,
+            type: attachment.type,
+            url: attachment.url,
+          })),
+        );
+        if (attachmentError) console.warn('Error al guardar adjuntos del correo:', attachmentError);
+      }
     });
   }
 
@@ -1789,10 +1808,21 @@ function openReader(m: Mail): void {
       '<div style="margin-top:1rem;padding-top:.8rem;border-top:1px solid var(--border)"><b>' +
       escapeHtml(t('attachment')) +
       ':</b><div class="attach-list" style="padding:.4rem 0">' +
-      m.attachments.map((a) => `<span class="attach-item">📎 ${escapeHtml(a.name)}</span>`).join('') +
+      m.attachments.map((a) => {
+        const preview = a.data && a.type.startsWith('image/')
+          ? `<img class="attach-preview" src="${escapeAttr(a.data)}" alt="${escapeAttr(a.name)}" />`
+          : `<span class="attach-icon">${a.type === 'application/pdf' ? 'PDF' : '📎'}</span>`;
+        const action = a.url || a.data
+          ? `<span class="attach-actions"><a class="attach-download-btn" href="${escapeAttr(a.url || a.data!)}" download="${escapeAttr(a.name)}">Descargar</a><button class="attach-preview-btn" type="button" data-preview-attachment="${m.attachments!.indexOf(a)}">Previsualizar</button></span>`
+          : '<span class="attach-actions"><button class="attach-download-btn" type="button" disabled>Descargar</button><button class="attach-preview-btn" type="button" disabled>Previsualizar</button></span>';
+        return `<div class="attach-item">${preview}<span class="attach-meta"><b>${escapeHtml(a.name)}</b><span class="kb">${a.size ? Math.round(a.size / 1024) + ' KB' : 'Enlace'}</span>${action}</span></div>`;
+      }).join('') +
       '</div></div>';
   }
   body.innerHTML = html;
+  body.querySelectorAll<HTMLButtonElement>('[data-preview-attachment]').forEach((button) => {
+    button.onclick = () => openAttachmentPreview(m.attachments![Number(button.dataset.previewAttachment)]);
+  });
   const headStarBtn = document.getElementById('readerHeadStar')!;
   const toggleStar = () => {
     const nextStarred = !m.starred;
@@ -1802,7 +1832,7 @@ function openReader(m: Mail): void {
     headStarBtn.textContent = m.starred ? '★' : '☆';
     persist();
     updateFolderCounts();
-    if (account?.provider && token) {
+    if ((account?.provider === 'gmail' || account?.provider === 'outlook') && token) {
       void updateRealMail(account.provider, token, m.id, nextStarred ? 'star' : 'unstar').then((updated) => {
         if (!updated) {
         toast('No se pudo actualizar el favorito en el proveedor de correo.');
@@ -1819,7 +1849,7 @@ function openReader(m: Mail): void {
     m.starred = false;
     persist();
     closeReaderView();
-    if (account?.provider && token) {
+    if ((account?.provider === 'gmail' || account?.provider === 'outlook') && token) {
       void updateRealMail(account.provider, token, m.id, 'trash').then((updated) => {
         if (!updated) {
         toast('No se pudo enviar el correo a la papelera.');
@@ -1860,6 +1890,38 @@ function closeReaderView(): void {
   modal?.setAttribute('aria-hidden', 'true');
   main?.classList.remove('reader-open');
   renderMails();
+}
+
+function openAttachmentPreview(attachment: Attachment): void {
+  const source = attachment.data || attachment.url;
+  const modal = document.getElementById('attachmentPreviewModal');
+  const title = document.getElementById('attachmentPreviewTitle');
+  const content = document.getElementById('attachmentPreviewContent');
+  if (!modal || !title || !content || !source) return;
+
+  title.textContent = attachment.name;
+  content.innerHTML = '';
+  if (attachment.type.startsWith('image/')) {
+    content.innerHTML = `<img src="${escapeAttr(source)}" alt="${escapeAttr(attachment.name)}" />`;
+  } else if (attachment.type === 'application/pdf' || attachment.type.startsWith('text/')) {
+    content.innerHTML = `<iframe src="${escapeAttr(source)}" title="${escapeAttr(attachment.name)}"></iframe>`;
+  } else if (attachment.type.startsWith('video/')) {
+    content.innerHTML = `<video src="${escapeAttr(source)}" controls></video>`;
+  } else if (attachment.type.startsWith('audio/')) {
+    content.innerHTML = `<audio src="${escapeAttr(source)}" controls></audio>`;
+  } else {
+    content.innerHTML = '<p class="attachment-preview-empty">Este formato no tiene previsualización disponible en el navegador.</p>';
+  }
+  modal.classList.add('open');
+  modal.setAttribute('aria-hidden', 'false');
+}
+
+function closeAttachmentPreview(): void {
+  const modal = document.getElementById('attachmentPreviewModal');
+  const content = document.getElementById('attachmentPreviewContent');
+  modal?.classList.remove('open');
+  modal?.setAttribute('aria-hidden', 'true');
+  if (content) content.innerHTML = '';
 }
 
 function sanitizeEmailHtml(html: string): string {
@@ -2069,11 +2131,20 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('attachFileBtn')!.onclick = () =>
     (document.getElementById('attachFileInput') as HTMLInputElement).click();
   document.getElementById('attachFileInput')!.addEventListener('change', (e) => {
-    [...(e.target as HTMLInputElement).files!].forEach((f) =>
-      composeAttachments.push({ name: f.name, size: f.size, type: f.type })
-    );
+    [...(e.target as HTMLInputElement).files!].forEach((file) => {
+      const read = new Promise<void>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          composeAttachments.push({ name: file.name, size: file.size, type: file.type || 'application/octet-stream', data: String(reader.result) });
+          renderAttachments();
+          resolve();
+        };
+        reader.onerror = () => reject(reader.error || new Error(`No se pudo leer ${file.name}`));
+        reader.readAsDataURL(file);
+      });
+      pendingAttachmentReads.push(read);
+    });
     (e.target as HTMLInputElement).value = '';
-    renderAttachments();
   });
   document.getElementById('insertImageBtn')!.onclick = () =>
     (document.getElementById('attachImageInput') as HTMLInputElement).click();
@@ -2152,6 +2223,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   };
 
   document.getElementById('closeReader')!.onclick = closeReaderView;
+  document.getElementById('closeAttachmentPreview')!.onclick = closeAttachmentPreview;
+  document.getElementById('attachmentPreviewModal')!.addEventListener('click', (event) => {
+    if ((event.target as HTMLElement).id === 'attachmentPreviewModal') closeAttachmentPreview();
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') closeAttachmentPreview();
+  });
 
   const userAvatar = document.getElementById('userAvatar')!;
   const userMenu = document.getElementById('userMenu')!;

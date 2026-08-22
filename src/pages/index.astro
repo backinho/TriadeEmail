@@ -55,12 +55,18 @@ import logoPositive from '../images/LOGO-POSITIVO.png';
 <script>
   import '../scripts/common.ts';
   import { supabase } from '../scripts/supabase';
+  import { toast } from '../scripts/notifications';
 
   const alertBox = document.getElementById('authAlert') as HTMLDivElement;
   const loginForm = document.getElementById('loginForm') as HTMLFormElement;
   const emailInput = document.getElementById('loginEmail') as HTMLInputElement;
   const passwordInput = document.getElementById('loginPassword') as HTMLInputElement;
   const submitBtn = document.getElementById('loginSubmitBtn') as HTMLButtonElement;
+
+  const authHash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+  if (authHash.get('type') === 'recovery') {
+    window.location.replace(`./reset-password${window.location.hash}`);
+  }
 
   // Check if session already exists
   supabase.auth.getSession().then(({ data: { session } }) => {
@@ -88,18 +94,17 @@ import logoPositive from '../images/LOGO-POSITIVO.png';
       });
 
       if (error) {
-        alertBox.textContent = error.message.includes('Invalid login credentials')
+        const message = error.message.includes('Invalid login credentials')
           ? 'Correo o contraseña incorrectos.'
           : error.message;
-        alertBox.style.display = 'block';
+        toast(message, 'error');
         submitBtn.disabled = false;
         submitBtn.textContent = originalBtnText;
       } else if (data.session) {
         window.location.href = './app';
       }
     } catch (err: any) {
-      alertBox.textContent = err?.message || 'Error inesperado al iniciar sesión.';
-      alertBox.style.display = 'block';
+      toast(err?.message || 'Error inesperado al iniciar sesión.', 'error');
       submitBtn.disabled = false;
       submitBtn.textContent = originalBtnText;
     }

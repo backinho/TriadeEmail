@@ -28,6 +28,7 @@ export interface Attachment {
   size: number;
   type: string;
   url?: string;
+  data?: string;
 }
 
 export type Folder = 'inbox' | 'sent' | 'drafts' | 'spam' | 'trash';

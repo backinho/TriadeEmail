@@ -49,6 +49,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
 <script>
   import '../scripts/common.ts';
   import { supabase } from '../scripts/supabase';
+  import { toast } from '../scripts/notifications';
 
   const alertBox = document.getElementById('registerAlert') as HTMLDivElement;
   const successBox = document.getElementById('registerSuccess') as HTMLDivElement;
@@ -70,8 +71,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     const confirmPassword = confirmPasswordInput.value;
 
     if (password !== confirmPassword) {
-      alertBox.textContent = 'Las contraseñas no coinciden.';
-      alertBox.style.display = 'block';
+      toast('Las contraseñas no coinciden.', 'error');
       return;
     }
 
@@ -91,8 +91,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
       });
 
       if (error) {
-        alertBox.textContent = error.message;
-        alertBox.style.display = 'block';
+        toast(error.message, 'error');
         submitBtn.disabled = false;
         submitBtn.textContent = originalBtnText;
       } else if (data.session) {
@@ -100,15 +99,13 @@ import BaseLayout from '../layouts/BaseLayout.astro';
         window.location.href = './app';
       } else if (data.user) {
         // Confirmation required or account created
-        successBox.textContent = '¡Cuenta creada con éxito! Puedes iniciar sesión ahora.';
-        successBox.style.display = 'block';
+        toast('¡Cuenta creada con éxito! Puedes iniciar sesión ahora.', 'success');
         setTimeout(() => {
           window.location.href = './';
         }, 1500);
       }
     } catch (err: any) {
-      alertBox.textContent = err?.message || 'Error al registrar la cuenta.';
-      alertBox.style.display = 'block';
+      toast(err?.message || 'Error al registrar la cuenta.', 'error');
       submitBtn.disabled = false;
       submitBtn.textContent = originalBtnText;
     }

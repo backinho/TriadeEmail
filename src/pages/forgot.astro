@@ -36,6 +36,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
 <script>
   import '../scripts/common.ts';
   import { supabase } from '../scripts/supabase';
+  import { toast } from '../scripts/notifications';
 
   const alertBox = document.getElementById('forgotAlert') as HTMLDivElement;
   const successBox = document.getElementById('forgotSuccess') as HTMLDivElement;
@@ -57,23 +58,20 @@ import BaseLayout from '../layouts/BaseLayout.astro';
 
     try {
       const { error } = await supabase.auth.resetPasswordForEmail(email, {
-        redirectTo: `${window.location.origin}/`,
+        redirectTo: `${window.location.origin}/reset-password`,
       });
 
       if (error) {
-        alertBox.textContent = error.message;
-        alertBox.style.display = 'block';
+        toast(error.message, 'error');
         submitBtn.disabled = false;
         submitBtn.textContent = originalBtnText;
       } else {
-        successBox.textContent = 'Se ha enviado un correo con instrucciones para restablecer tu contraseña.';
-        successBox.style.display = 'block';
+        toast('Se ha enviado un correo con instrucciones para restablecer tu contraseña.', 'success');
         submitBtn.disabled = false;
         submitBtn.textContent = originalBtnText;
       }
     } catch (err: any) {
-      alertBox.textContent = err?.message || 'Error al enviar enlace de recuperación.';
-      alertBox.style.display = 'block';
+      toast(err?.message || 'Error al enviar enlace de recuperación.', 'error');
       submitBtn.disabled = false;
       submitBtn.textContent = originalBtnText;
     }
