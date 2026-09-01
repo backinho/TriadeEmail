@@ -464,10 +464,89 @@ export async function fetchRealGmailMails(accessToken: string, accountEmail: str
  * Extracts real live emails from Microsoft Graph API (Outlook)
  * Endpoint: https://graph.microsoft.com/v1.0/me/messages
  */
+async function loadOutlookAttachment(accessToken: string, messageId: string, attachment: any): Promise<Attachment | null> {
+  if (!attachment || attachment.isInline || attachment.contentType === 'message/rfc822') {
+    return null;
+  }
+
+  if (attachment.contentBytes) {
+    return {
+      name: attachment.name || 'Adjunto',
+      size: Number(attachment.size) || 0,
+      type: attachment.contentType || 'application/octet-stream',
+      data: `data:${attachment.contentType || 'application/octet-stream'};base64,${attachment.contentBytes}`,
+    };
+  }
+
+  if (!attachment.id) {
+    return null;
+  }
+
+  try {
+    const attachmentRes = await fetch(
+      `https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachment.id)}`,
+      {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      }
+    );
+
+    if (!attachmentRes.ok) {
+      return null;
+    }
+
+    const attachmentData = await attachmentRes.json();
+    if (!attachmentData.contentBytes) {
+      return null;
+    }
+
+    return {
+      name: attachmentData.name || attachment.name || 'Adjunto',
+      size: Number(attachmentData.size) || Number(attachment.size) || 0,
+      type: attachmentData.contentType || attachment.contentType || 'application/octet-stream',
+      data: `data:${attachmentData.contentType || attachment.contentType || 'application/octet-stream'};base64,${attachmentData.contentBytes}`,
+    };
+  } catch (err) {
+    console.warn('Failed to fetch Outlook attachment bytes:', err);
+    return null;
+  }
+}
+
+async function loadOutlookMessageAttachments(accessToken: string, messageId: string): Promise<Attachment[]> {
+  try {
+    const listRes = await fetch(
+      `https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(messageId)}/attachments?$select=id,name,contentType,size,isInline`,
+      {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      }
+    );
+
+    if (!listRes.ok) {
+      return [];
+    }
+
+    const listData = await listRes.json();
+    const attachments: any[] = listData.value || [];
+    const loaded: Attachment[] = [];
+
+    for (const attachment of attachments) {
+      if (!attachment || attachment.isInline) continue;
+      const resolved = await loadOutlookAttachment(accessToken, messageId, attachment);
+      if (resolved) {
+        loaded.push(resolved);
+      }
+    }
+
+    return loaded;
+  } catch (err) {
+    console.warn('Failed to fetch Outlook message attachments:', err);
+    return [];
+  }
+}
+
 export async function fetchRealOutlookMails(accessToken: string, accountEmail: string): Promise<Mail[]> {
   try {
     const res = await fetch(
-      'https://graph.microsoft.com/v1.0/me/messages?$top=50&$expand=attachments($select=name,contentType,size,contentBytes,isInline)&$select=id,subject,bodyPreview,body,from,toRecipients,receivedDateTime,sentDateTime,isRead,flag,attachments',
+      'https://graph.microsoft.com/v1.0/me/messages?$top=50&$select=id,subject,bodyPreview,body,from,toRecipients,receivedDateTime,sentDateTime,isRead,flag',
       {
         headers: { Authorization: `Bearer ${accessToken}` },
       }
@@ -482,7 +561,9 @@ export async function fetchRealOutlookMails(accessToken: string, accountEmail: s
     const data = await res.json();
     const items: any[] = data.value || [];
 
-    const fetchedMails: Mail[] = items.map((m: any) => {
+    const fetchedMails: Mail[] = [];
+
+    for (const m of items) {
       const senderName = m.from?.emailAddress?.name || m.from?.emailAddress?.address || 'Outlook User';
       const senderEmail = m.from?.emailAddress?.address || '';
       const toAddress = m.toRecipients?.[0]?.emailAddress?.address || accountEmail;
@@ -492,18 +573,11 @@ export async function fetchRealOutlookMails(accessToken: string, accountEmail: s
         : dateObj.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
       const isSent = senderEmail.toLowerCase() === accountEmail.toLowerCase();
-      const attachments: Attachment[] = (m.attachments || [])
-        .filter((attachment: any) => !attachment.isInline && attachment.contentBytes)
-        .map((attachment: any) => ({
-          name: attachment.name || 'Adjunto',
-          size: Number(attachment.size) || 0,
-          type: attachment.contentType || 'application/octet-stream',
-          data: `data:${attachment.contentType || 'application/octet-stream'};base64,${attachment.contentBytes}`,
-        }));
+      const attachments = await loadOutlookMessageAttachments(accessToken, m.id || '');
 
       const timestampNum = !isNaN(dateObj.getTime()) ? dateObj.getTime() : Date.now();
 
-      return {
+      fetchedMails.push({
         id: m.id || uid('m'),
         from: senderName,
         fromEmail: senderEmail,
@@ -518,8 +592,8 @@ export async function fetchRealOutlookMails(accessToken: string, accountEmail: s
         starred: m.flag?.flagStatus === 'flagged',
         folder: isSent ? ('sent' as Folder) : ('inbox' as Folder),
         attachments,
-      };
-    });
+      });
+    }
 
     // Ordenar de más reciente a más antiguo (timestamp descendente)
     return fetchedMails.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
