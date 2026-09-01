@@ -153,6 +153,32 @@ const persist = (): void => {
   }
 };
 
+function clearOutlookCachedSession(accountEmail: string): void {
+  const target = accountEmail.toLowerCase();
+  const accIndex = accounts.findIndex((a) => a.email.toLowerCase() === target && a.provider === 'outlook');
+
+  if (accIndex !== -1) {
+    accounts[accIndex].access_token = undefined;
+    accounts[accIndex].token = undefined;
+    accounts[accIndex].refresh_token = undefined;
+    accounts[accIndex].status = 'connected';
+  }
+
+  if ((window as any).supabaseProviderToken && target.includes('outlook')) {
+    delete (window as any).supabaseProviderToken;
+  }
+
+  if (currentUser) {
+    supabase.from('user_accounts')
+      .update({ access_token: null, refresh_token: null })
+      .eq('user_id', currentUser.id)
+      .ilike('email', target)
+      .then(({ error }) => {
+        if (error) console.warn('No se pudo limpiar la sesión de Outlook en Supabase:', error);
+      });
+  }
+}
+
 function showPendingUnlinkNotices(): void {
   const notice = store.get<{ emails: string[]; at: number } | null>(KEYS.unlinkNotice, null);
   if (!notice?.emails?.length) return;
@@ -971,10 +997,16 @@ async function syncAccountInbox(accountEmailRaw: string, forcedProvider?: EmailP
       }
     } catch (err: any) {
       console.warn('Could not fetch live mails with token:', err);
+      if (provider === 'outlook') {
+        clearOutlookCachedSession(accountEmail);
+      }
       toast(`⚠️ Error al conectar con ${provider === 'gmail' ? 'Gmail' : 'Outlook'} API (${accountEmail}): La sesión del correo ha expirado. Vuelve a vincular la cuenta.`);
     }
   } else {
     console.warn(`No active live token found for ${accountEmail} (${provider}).`);
+    if (provider === 'outlook') {
+      clearOutlookCachedSession(accountEmail);
+    }
   }
 
   let addedCount = 0;
