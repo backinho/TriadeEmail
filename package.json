@@ -2,19 +2,58 @@
   "name": "triade-mail",
   "type": "module",
   "version": "0.0.1",
+  "main": "electron/main.mjs",
   "scripts": {
     "dev": "astro dev",
     "start": "astro dev",
-    "build": "astro build",
+    "build": "npm run build:web",
+    "build:web": "astro build",
+    "electron:dev": "npm run build:web && electron .",
+    "dist:win": "npm run build:web && node electron/build-windows.mjs",
+    "publish:win": "npm run build:web && node electron/build-windows.mjs --publish",
     "preview": "astro preview",
     "astro": "astro"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.8",
-    "astro": "^7.3.5"
+    "astro": "^7.3.5",
+    "electron-updater": "^6.8.9"
   },
   "devDependencies": {
     "@astrojs/check": "^0.9.9",
+    "electron": "^44.5.1",
+    "electron-builder": "^26.15.3",
     "typescript": "^5.7.3"
+  },
+  "build": {
+    "appId": "com.triade.mail",
+    "productName": "Triade Mail",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**/*",
+      "web-dist/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "backinho",
+      "repo": "TriadeEmail",
+      "releaseType": "release"
+    }
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "electron-winstaller@5.4.0": true,
+    "electron@44.5.1": true
   }
 }
