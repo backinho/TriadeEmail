@@ -1198,6 +1198,13 @@ async function syncAccountInbox(accountEmailRaw: string, forcedProvider?: EmailP
   return liveMailCount;
 }
 
+function isLiveProviderAccount(account: Account): boolean {
+  const provider = account.provider === 'gmail' || account.provider === 'outlook'
+    ? account.provider
+    : inferProvider(account.email);
+  return provider === 'gmail' || provider === 'outlook';
+}
+
 function renderAccounts(): void {
   const list = document.getElementById('accountsList')!;
   list.innerHTML = '';
@@ -1212,7 +1219,7 @@ function renderAccounts(): void {
   };
   list.appendChild(chipAll);
   accounts.forEach((a) => {
-    if (a.provider !== 'outlook' && inferProvider(a.email) !== 'outlook') return;
+    if (!isLiveProviderAccount(a)) return;
     const el = document.createElement('div');
     el.className = 'acct-chip' + (activeAccount === a.email ? ' active' : '');
     const badge = a.provider === 'gmail' ? ' 🔴' : a.provider === 'outlook' ? ' 🔵' : '';
@@ -1230,7 +1237,7 @@ function renderAccounts(): void {
   if (edit) {
     edit.innerHTML = '';
     accounts.forEach((a, i) => {
-      if (a.provider !== 'outlook' && inferProvider(a.email) !== 'outlook') return;
+      if (!isLiveProviderAccount(a)) return;
       const row = document.createElement('div');
       row.className = 'account-item';
       const providerLabel = a.provider === 'gmail' ? 'Gmail' : a.provider === 'outlook' ? 'Outlook' : 'Email';
