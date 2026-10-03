@@ -6,6 +6,7 @@ interface ImportMetaEnv {
   readonly PUBLIC_SUPABASE_ANON_KEY: string;
   readonly VITE_SUPABASE_URL: string;
   readonly VITE_SUPABASE_ANON_KEY: string;
+  readonly PUBLIC_GOOGLE_CLIENT_ID: string;
 }
 
 interface ImportMeta {

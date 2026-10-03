@@ -11,23 +11,37 @@ export async function updateRealMail(
   provider: 'gmail' | 'outlook',
   accessToken: string,
   messageId: string,
-  action: 'star' | 'unstar' | 'trash'
+  action: 'star' | 'unstar' | 'trash' | 'spam' | 'restore' | 'delete'
 ): Promise<boolean> {
   try {
+    const gmailUrl = `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(messageId)}`;
+    const outlookUrl = `https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(messageId)}`;
     const url = provider === 'gmail'
-      ? `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(messageId)}/modify`
-      : action === 'trash'
-        ? `https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(messageId)}/move`
-        : `https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(messageId)}`;
+      ? action === 'delete' ? gmailUrl : `${gmailUrl}/modify`
+      : action === 'delete' ? outlookUrl
+        : action === 'trash' || action === 'spam' || action === 'restore' ? `${outlookUrl}/move`
+          : outlookUrl;
     const body = provider === 'gmail'
-      ? { addLabelIds: action === 'star' ? ['STARRED'] : action === 'trash' ? ['TRASH'] : [], removeLabelIds: action === 'unstar' ? ['STARRED'] : [] }
-      : action === 'trash'
-        ? { destinationId: 'deleteditems' }
-        : { flag: { flagStatus: action === 'star' ? 'flagged' : 'notFlagged' } };
+      ? action === 'star' ? { addLabelIds: ['STARRED'] }
+        : action === 'unstar' ? { removeLabelIds: ['STARRED'] }
+          : action === 'trash' ? { addLabelIds: ['TRASH'], removeLabelIds: ['INBOX'] }
+            : action === 'spam' ? { addLabelIds: ['SPAM'], removeLabelIds: ['INBOX'] }
+              : action === 'restore' ? { addLabelIds: ['INBOX'], removeLabelIds: ['TRASH', 'SPAM'] }
+                : undefined
+      : action === 'trash' ? { destinationId: 'deleteditems' }
+        : action === 'spam' ? { destinationId: 'junkemail' }
+          : action === 'restore' ? { destinationId: 'inbox' }
+            : action === 'star' || action === 'unstar' ? { flag: { flagStatus: action === 'star' ? 'flagged' : 'notFlagged' } }
+              : undefined;
     const res = await fetch(url, {
-      method: provider === 'gmail' || action === 'trash' ? 'POST' : 'PATCH',
-      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      method: provider === 'gmail' ? action === 'delete' ? 'DELETE' : 'POST'
+        : action === 'delete' ? 'DELETE' : action === 'trash' || action === 'spam' || action === 'restore' ? 'POST' : 'PATCH',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+        Prefer: 'IdType="ImmutableId"',
+      },
+      ...(body ? { body: JSON.stringify(body) } : {}),
     });
     return res.ok;
   } catch {
@@ -344,28 +358,31 @@ export async function sendRealOutlookMail(
  */
 export async function fetchRealGmailMails(accessToken: string, accountEmail: string): Promise<Mail[]> {
   try {
-    const listRes = await fetch(
-      'https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=50',
-      {
+    const messageSummaries: { id: string; threadId: string }[] = [];
+    let pageToken = '';
+    for (let page = 0; page < 20; page += 1) {
+      const params = new URLSearchParams({ maxResults: '100', includeSpamTrash: 'true' });
+      if (pageToken) params.set('pageToken', pageToken);
+      const listRes = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages?${params}`, {
         headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (!listRes.ok) {
+        const errText = await listRes.text();
+        console.warn('Error fetching Gmail messages list:', listRes.status, errText);
+        throw new Error(`Gmail API HTTP ${listRes.status}: ${errText}`);
       }
-    );
-
-    if (!listRes.ok) {
-      const errText = await listRes.text();
-      console.warn('Error fetching Gmail messages list:', listRes.status, errText);
-      throw new Error(`Gmail API HTTP ${listRes.status}: ${errText}`);
+      const listData = await listRes.json();
+      messageSummaries.push(...(listData.messages || []));
+      pageToken = listData.nextPageToken || '';
+      if (!pageToken) break;
     }
-
-    const listData = await listRes.json();
-    const messageSummaries: { id: string; threadId: string }[] = listData.messages || [];
 
     if (!messageSummaries.length) return [];
 
     const fetchedMails: Mail[] = [];
 
     // Fetch detail for messages
-    for (const item of messageSummaries.slice(0, 50)) {
+    for (const item of messageSummaries) {
       try {
         const detailRes = await fetch(
           `https://gmail.googleapis.com/gmail/v1/users/me/messages/${item.id}?format=full`,
@@ -416,14 +433,14 @@ export async function fetchRealGmailMails(accessToken: string, accountEmail: str
         const isStarred = labelIds.includes('STARRED');
 
         let folder: Folder = 'inbox';
-        if (labelIds.includes('SENT')) {
-          folder = 'sent';
-        } else if (labelIds.includes('DRAFT')) {
-          folder = 'drafts';
+        if (labelIds.includes('TRASH')) {
+          folder = 'trash';
         } else if (labelIds.includes('SPAM')) {
           folder = 'spam';
-        } else if (labelIds.includes('TRASH')) {
-          folder = 'trash';
+        } else if (labelIds.includes('DRAFT')) {
+          folder = 'drafts';
+        } else if (labelIds.includes('SENT')) {
+          folder = 'sent';
         }
 
         const { text: bodyText, html: bodyHtml } = extractGmailBody(msg.payload);
@@ -545,25 +562,36 @@ async function loadOutlookMessageAttachments(accessToken: string, messageId: str
 
 export async function fetchRealOutlookMails(accessToken: string, accountEmail: string): Promise<Mail[]> {
   try {
-    const res = await fetch(
-      'https://graph.microsoft.com/v1.0/me/messages?$top=50&$select=id,subject,bodyPreview,body,from,toRecipients,receivedDateTime,sentDateTime,isRead,flag',
-      {
-        headers: { Authorization: `Bearer ${accessToken}` },
+    const folders: { id: string; folder: Folder }[] = [
+      { id: 'inbox', folder: 'inbox' },
+      { id: 'sentitems', folder: 'sent' },
+      { id: 'drafts', folder: 'drafts' },
+      { id: 'junkemail', folder: 'spam' },
+      { id: 'deleteditems', folder: 'trash' },
+    ];
+    const items: { message: any; folder: Folder }[] = [];
+    const select = 'id,subject,bodyPreview,body,from,toRecipients,receivedDateTime,sentDateTime,isRead,flag,isDraft';
+    for (const folder of folders) {
+      let nextUrl: string | null = `https://graph.microsoft.com/v1.0/me/mailFolders/${folder.id}/messages?$top=100&$select=${select}`;
+      for (let page = 0; nextUrl && page < 10; page += 1) {
+        const pageUrl: string = nextUrl;
+        const res: Response = await fetch(pageUrl, {
+          headers: { Authorization: `Bearer ${accessToken}`, Prefer: 'IdType="ImmutableId"' },
+        });
+        if (!res.ok) {
+          const errText = await res.text();
+          console.warn(`Error fetching Outlook ${folder.id} messages:`, res.status, errText);
+          throw new Error(`Microsoft Graph API HTTP ${res.status}: ${errText}`);
+        }
+        const data: { value?: any[]; '@odata.nextLink'?: string } = await res.json();
+        items.push(...(data.value || []).map((message: any) => ({ message, folder: folder.folder })));
+        nextUrl = data['@odata.nextLink'] || null;
       }
-    );
-
-    if (!res.ok) {
-      const errText = await res.text();
-      console.warn('Error fetching Outlook messages:', res.status, errText);
-      throw new Error(`Microsoft Graph API HTTP ${res.status}: ${errText}`);
     }
-
-    const data = await res.json();
-    const items: any[] = data.value || [];
 
     const fetchedMails: Mail[] = [];
 
-    for (const m of items) {
+    for (const { message: m, folder } of items) {
       const senderName = m.from?.emailAddress?.name || m.from?.emailAddress?.address || 'Outlook User';
       const senderEmail = m.from?.emailAddress?.address || '';
       const toAddress = m.toRecipients?.[0]?.emailAddress?.address || accountEmail;
@@ -572,7 +600,6 @@ export async function fetchRealOutlookMails(accessToken: string, accountEmail: s
         ? new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
         : dateObj.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-      const isSent = senderEmail.toLowerCase() === accountEmail.toLowerCase();
       const attachments = await loadOutlookMessageAttachments(accessToken, m.id || '');
 
       const timestampNum = !isNaN(dateObj.getTime()) ? dateObj.getTime() : Date.now();
@@ -590,7 +617,7 @@ export async function fetchRealOutlookMails(accessToken: string, accountEmail: s
         timestamp: timestampNum,
         unread: !m.isRead,
         starred: m.flag?.flagStatus === 'flagged',
-        folder: isSent ? ('sent' as Folder) : ('inbox' as Folder),
+        folder: m.isDraft ? 'drafts' : folder,
         attachments,
       });
     }

@@ -18,16 +18,20 @@ const DEFAULT_PROFILE: Profile = {
 };
 
 const GOOGLE_OAUTH_SCOPES = [
+  'https://mail.google.com/',
   'https://www.googleapis.com/auth/gmail.modify',
   'https://www.googleapis.com/auth/gmail.send',
   'https://www.googleapis.com/auth/userinfo.email',
 ].join(' ');
+
+const GOOGLE_OAUTH_FUNCTION = 'google-oauth-token';
 
 const MICROSOFT_OAUTH_SCOPES = [
   'offline_access',
   'openid',
   'profile',
   'https://graph.microsoft.com/Mail.Read',
+  'https://graph.microsoft.com/Mail.ReadWrite',
   'https://graph.microsoft.com/Mail.Send',
   'https://graph.microsoft.com/User.Read',
 ].join(' ');
@@ -50,7 +54,9 @@ function loadSessionAccounts(): Account[] {
 function saveSessionAccounts(accs: Account[]): void {
   try {
     const sanitized = accs.map(({ id, user_id, email, primary, provider, status, lastSync, access_token, refresh_token, expires_at, token }) => ({
-      id, user_id, email, primary, provider, status, lastSync, access_token, refresh_token, expires_at, token,
+      id, user_id, email, primary, provider, status, lastSync, access_token,
+      refresh_token: provider === 'gmail' ? undefined : refresh_token,
+      expires_at, token,
     }));
     sessionStorage.setItem(KEYS.sessionAccounts, JSON.stringify(sanitized));
   } catch (err) {
@@ -99,21 +105,22 @@ const persist = (): void => {
   store.set(KEYS.profile, profile);
   store.set(KEYS.pageSize, pageSize);
 
-  // Guardar un resumen ligero de los 30 correos más recientes en localStorage para no exceder los 5MB del navegador
-  const lightMails = mails.slice(0, 30).map((m) => ({
+  const lightMails = mails.map((m) => ({
     id: m.id,
     from: m.from,
     fromEmail: m.fromEmail,
     to: m.to,
     subject: m.subject,
-    body: (m.body || '').slice(0, 180),
+    body: m.folder === 'drafts' ? (m.body || '') : (m.body || '').slice(0, 500),
+    bodyHtml: m.folder === 'drafts' ? m.bodyHtml : undefined,
+    draftDirty: m.draftDirty,
     account: m.account,
     time: m.time,
     timestamp: m.timestamp,
     unread: m.unread,
     starred: m.starred,
     folder: m.folder,
-    attachments: m.attachments,
+    attachments: m.folder === 'drafts' ? m.attachments : undefined,
   }));
   store.set(KEYS.mails, lightMails);
 
@@ -160,7 +167,6 @@ function clearOutlookCachedSession(accountEmail: string): void {
   if (accIndex !== -1) {
     accounts[accIndex].access_token = undefined;
     accounts[accIndex].token = undefined;
-    accounts[accIndex].refresh_token = undefined;
     accounts[accIndex].status = 'connected';
   }
 
@@ -170,7 +176,7 @@ function clearOutlookCachedSession(accountEmail: string): void {
 
   if (currentUser) {
     supabase.from('user_accounts')
-      .update({ access_token: null, refresh_token: null })
+      .update({ access_token: null })
       .eq('user_id', currentUser.id)
       .ilike('email', target)
       .then(({ error }) => {
@@ -198,9 +204,10 @@ async function restoreAccountsToDb(): Promise<void> {
     await supabase.from('user_accounts').upsert({
       user_id: currentUser.id,
       email: acc.email.toLowerCase(),
-      access_token: effToken || null,
-      refresh_token: acc.refresh_token || null,
-      expires_at: acc.expires_at || null,
+      provider: acc.provider || 'custom',
+      access_token: acc.provider === 'gmail' ? null : effToken || null,
+      refresh_token: acc.provider === 'gmail' ? null : acc.refresh_token || null,
+      expires_at: acc.provider === 'gmail' ? null : acc.expires_at || null,
       is_primary: acc.primary || false,
     }, { onConflict: 'user_id,email' });
   }
@@ -240,6 +247,13 @@ async function unlinkAccountByEmail(
   }
 
   const removed = accounts[index];
+  if (removed.provider === 'gmail' && (window as any).triadeElectron?.unlinkGoogleAccount) {
+    try {
+      await (window as any).triadeElectron.unlinkGoogleAccount(emailLower);
+    } catch (error) {
+      console.warn('No se pudo borrar la credencial local de Google:', error);
+    }
+  }
   accounts.splice(index, 1);
 
   if (removed.primary && accounts.length > 0) {
@@ -382,20 +396,51 @@ async function resolveSendToken(acc: Account): Promise<string | null> {
   if (session?.access_token) cachedAuthToken = session.access_token;
 
   const candidates: string[] = [];
+  if (acc.access_token) candidates.push(acc.access_token);
+  if (acc.token) candidates.push(acc.token);
   if (session?.provider_token && !session.provider_token.startsWith('eyJ')) {
     candidates.push(session.provider_token);
   }
-  if (acc.access_token) candidates.push(acc.access_token);
-  if (acc.token) candidates.push(acc.token);
   const globalToken = (window as any).supabaseProviderToken;
   if (globalToken) candidates.push(globalToken);
 
+  let usableToken: string | null = null;
   for (const token of candidates) {
     if (!token || token.startsWith('eyJ')) continue;
-    if (acc.provider === 'gmail' && token.startsWith('ya29')) return token;
+    if (acc.provider === 'gmail' && token.startsWith('ya29')) {
+      usableToken = token;
+      break;
+    }
     if (acc.provider === 'outlook') return token;
   }
-  return null;
+  if (acc.provider === 'gmail' && currentUser) {
+    usableToken = await refreshGoogleAccessToken(acc.email) || usableToken;
+  }
+  return usableToken;
+}
+
+async function refreshGoogleAccessToken(accountEmail: string): Promise<string | null> {
+  const desktopApi = (window as any).triadeElectron;
+  const clientId = (import.meta as any).env.PUBLIC_GOOGLE_CLIENT_ID || (window as any).PUBLIC_GOOGLE_CLIENT_ID;
+  if (!desktopApi?.refreshGoogleToken || !clientId) {
+    console.warn('La renovación de Google solo está disponible en Triade Mail para escritorio.');
+    return null;
+  }
+  let data: { access_token?: string; expires_in?: number };
+  try {
+    data = await desktopApi.refreshGoogleToken(accountEmail.toLowerCase(), clientId);
+  } catch (error) {
+    console.warn('No se pudo renovar el token de Google:', error);
+    return null;
+  }
+  if (!data?.access_token) return null;
+  const account = accounts.find((item) => item.email.toLowerCase() === accountEmail.toLowerCase());
+  if (account) {
+    account.access_token = data.access_token;
+    account.token = data.access_token;
+    account.expires_at = Date.now() + Number(data.expires_in || 3600) * 1000;
+  }
+  return data.access_token as string;
 }
 
 async function fetchGoogleUserEmail(accessToken: string): Promise<string | null> {
@@ -490,7 +535,8 @@ function base64UrlEncode(value: ArrayBuffer): string {
 }
 
 async function createMicrosoftPkceChallenge(): Promise<{ verifier: string; challenge: string }> {
-  const verifier = Array.from({ length: 64 }, () => 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~'[Math.floor(Math.random() * 64)]).join('');
+  const randomBytes = crypto.getRandomValues(new Uint8Array(48));
+  const verifier = base64UrlEncode(randomBytes.buffer);
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
   return { verifier, challenge: base64UrlEncode(digest) };
 }
@@ -553,27 +599,36 @@ async function handleDirectOAuthRedirect(): Promise<boolean> {
   const params = new URLSearchParams((hash ? hash.replace(/^#/, '') : search.replace(/^\?/, '')));
 
   const providerToken = params.get('provider_token');
-  const accessToken = params.get('access_token');
+  const oauthError = params.get('error');
   const code = params.get('code');
-  const savedVerifier = sessionStorage.getItem('triade_ms_pkce_verifier');
+  const savedMicrosoftVerifier = sessionStorage.getItem('triade_ms_pkce_verifier');
 
-  if (!providerToken && !accessToken && !code) return false;
+  if (oauthError) {
+    sessionStorage.removeItem('triade_ms_pkce_verifier');
+    history.replaceState(null, '', window.location.pathname);
+    toast(`⚠️ El proveedor no autorizó la cuenta: ${params.get('error_description') || oauthError}`);
+    return true;
+  }
+  if (!providerToken && !code) return false;
 
   isExchangingOAuthCode = true;
   try {
-    let tokenToUse: string | null = providerToken || accessToken || null;
+    let tokenToUse: string | null = providerToken || null;
     let refreshTokenToUse: string | undefined = undefined;
+    let tokenExpiresIn: number | undefined;
 
-    if (!tokenToUse && code && savedVerifier) {
+    if (!tokenToUse && code && savedMicrosoftVerifier) {
       sessionStorage.removeItem('triade_ms_pkce_verifier');
       history.replaceState(null, '', window.location.pathname);
-      const tokenResult = await exchangeMicrosoftCodeForToken(code, savedVerifier);
+      const tokenResult = await exchangeMicrosoftCodeForToken(code, savedMicrosoftVerifier);
       if (tokenResult) {
         tokenToUse = tokenResult.access_token;
         refreshTokenToUse = tokenResult.refresh_token;
       }
     } else if (code) {
       history.replaceState(null, '', window.location.pathname);
+      toast('⚠️ No se pudo validar el retorno OAuth. Inicia la vinculación otra vez.');
+      return false;
     }
 
     if (!tokenToUse) return false;
@@ -597,7 +652,8 @@ async function handleDirectOAuthRedirect(): Promise<boolean> {
       if (accIndex !== -1) {
         accounts[accIndex].token = tokenToUse;
         accounts[accIndex].access_token = tokenToUse;
-        if (refreshTokenToUse) accounts[accIndex].refresh_token = refreshTokenToUse;
+        accounts[accIndex].expires_at = tokenExpiresIn ? Date.now() + tokenExpiresIn * 1000 : undefined;
+        if (provider === 'outlook' && refreshTokenToUse) accounts[accIndex].refresh_token = refreshTokenToUse;
         accounts[accIndex].status = 'connected';
       } else {
         accounts.push({
@@ -607,7 +663,8 @@ async function handleDirectOAuthRedirect(): Promise<boolean> {
           status: 'connected',
           token: tokenToUse,
           access_token: tokenToUse,
-          refresh_token: refreshTokenToUse,
+          refresh_token: provider === 'outlook' ? refreshTokenToUse : undefined,
+          expires_at: tokenExpiresIn ? Date.now() + tokenExpiresIn * 1000 : undefined,
         });
       }
 
@@ -615,8 +672,9 @@ async function handleDirectOAuthRedirect(): Promise<boolean> {
         await supabase.from('user_accounts').upsert({
           user_id: currentUser.id,
           email: userEmail.toLowerCase(),
-          access_token: tokenToUse,
-          refresh_token: refreshTokenToUse || null,
+          access_token: provider === 'gmail' ? null : tokenToUse,
+          refresh_token: provider === 'outlook' ? refreshTokenToUse || null : null,
+          expires_at: provider === 'gmail' ? null : tokenExpiresIn ? Date.now() + tokenExpiresIn * 1000 : null,
           is_primary: accounts.length === 1,
         }, { onConflict: 'user_id,email' });
       }
@@ -651,7 +709,7 @@ async function syncSupabaseData(): Promise<void> {
       return unloadTime ? Date.now() - parseInt(unloadTime, 10) < 8000 : false;
     })();
 
-    // Procesar primero cualquier vinculación directa por hash (#access_token=ya29...) para no alterar la sesión principal
+    // Handle a linked mailbox callback without changing the primary Supabase login.
     await handleDirectOAuthRedirect();
 
     const hashParams = new URLSearchParams((window.location.hash || '').replace(/^#/, ''));
@@ -694,15 +752,16 @@ async function syncSupabaseData(): Promise<void> {
           // Si el correo guardado en DB tenía la cadena sucia #ext#, eliminar la fila antigua en Supabase
           supabase.from('user_accounts').delete().eq('id', a.id).then(() => {});
         }
+        const accountProvider = a.provider || ((cleanE.includes('gmail') || cleanE.includes('googlemail')) ? 'gmail' as EmailProvider : (cleanE.includes('outlook') || cleanE.includes('hotmail') || cleanE.includes('live') || cleanE.includes('onmicrosoft.com')) ? 'outlook' as EmailProvider : 'custom' as EmailProvider);
         return {
           id: a.id,
           user_id: a.user_id,
           email: cleanE,
           primary: a.is_primary,
-          provider: (cleanE.includes('gmail') ? 'gmail' as EmailProvider : (cleanE.includes('outlook') || cleanE.includes('hotmail') || cleanE.includes('live') || cleanE.includes('onmicrosoft.com')) ? 'outlook' as EmailProvider : 'custom' as EmailProvider),
+          provider: accountProvider,
           status: 'connected' as const,
           access_token: a.access_token || undefined,
-          refresh_token: a.refresh_token || undefined,
+          refresh_token: accountProvider === 'gmail' ? undefined : a.refresh_token || undefined,
           expires_at: a.expires_at || undefined,
           token: a.access_token || undefined,
         };
@@ -713,7 +772,13 @@ async function syncSupabaseData(): Promise<void> {
       accounts = dbMapped.map((dbAcc) => {
         const sessionAcc = sessionMap.get(dbAcc.email.toLowerCase());
         if (sessionAcc?.access_token || sessionAcc?.token) {
-          return { ...dbAcc, access_token: sessionAcc.access_token || sessionAcc.token, token: sessionAcc.token || sessionAcc.access_token };
+          return {
+            ...dbAcc,
+            provider: sessionAcc.provider || dbAcc.provider,
+            access_token: sessionAcc.access_token || sessionAcc.token,
+            token: sessionAcc.token || sessionAcc.access_token,
+            refresh_token: sessionAcc.provider === 'gmail' ? undefined : sessionAcc.refresh_token || dbAcc.refresh_token,
+          };
         }
         return dbAcc;
       });
@@ -761,8 +826,9 @@ async function syncSupabaseData(): Promise<void> {
           const { error: accErr } = await supabase.from('user_accounts').upsert({
             user_id: currentUser.id,
             email: cleanEmail,
-            access_token: providerToken,
-            refresh_token: session.provider_refresh_token || null,
+            provider: provider,
+            access_token: provider === 'gmail' ? null : providerToken,
+            refresh_token: provider === 'gmail' ? null : session.provider_refresh_token || null,
             is_primary: accounts.length === 1,
           }, { onConflict: 'user_id,email' });
 
@@ -959,6 +1025,10 @@ async function syncAccountInbox(accountEmailRaw: string, forcedProvider?: EmailP
     }
   }
 
+  if (provider === 'gmail' && currentUser && (!effectiveToken || !acc?.expires_at || acc.expires_at <= Date.now() + 120_000)) {
+    effectiveToken = await refreshGoogleAccessToken(accountEmail) || effectiveToken;
+  }
+
   // Si es Outlook y no tenemos un token válido, intentar renovarlo si tenemos refresh_token
   if (provider === 'outlook' && !effectiveToken && acc?.refresh_token) {
     const newToken = await refreshMicrosoftAccessToken(acc.refresh_token);
@@ -997,10 +1067,20 @@ async function syncAccountInbox(accountEmailRaw: string, forcedProvider?: EmailP
       }
     } catch (err: any) {
       console.warn('Could not fetch live mails with token:', err);
-      if (provider === 'outlook') {
+      if (provider === 'gmail' && String(err?.message || '').includes('HTTP 401')) {
+        const refreshedToken = await refreshGoogleAccessToken(accountEmail);
+        if (refreshedToken) {
+          effectiveToken = refreshedToken;
+          try {
+            liveMails = await fetchRealGmailMails(refreshedToken, accountEmail);
+          } catch (retryError) {
+            console.warn('Gmail retry after token refresh failed:', retryError);
+          }
+        }
+      } else if (provider === 'outlook') {
         clearOutlookCachedSession(accountEmail);
       }
-      toast(`⚠️ Error al conectar con ${provider === 'gmail' ? 'Gmail' : 'Outlook'} API (${accountEmail}): La sesión del correo ha expirado. Vuelve a vincular la cuenta.`);
+      if (!liveMails.length) toast(`⚠️ Error al conectar con ${provider === 'gmail' ? 'Gmail' : 'Outlook'} API (${accountEmail}): La sesión del correo ha expirado. Vuelve a vincular la cuenta.`);
     }
   } else {
     console.warn(`No active live token found for ${accountEmail} (${provider}).`);
@@ -1009,12 +1089,27 @@ async function syncAccountInbox(accountEmailRaw: string, forcedProvider?: EmailP
     }
   }
 
-  let addedCount = 0;
+  let liveMailCount = 0;
   if (liveMails.length > 0) {
-    // Reemplazar correos antiguos de esta cuenta con los correos reales en vivo extraídos de la API (solo en memoria)
-    mails = mails.filter((m) => m.account.toLowerCase() !== accountEmail.toLowerCase());
-    mails.push(...liveMails);
-    addedCount = liveMails.length;
+    const existingById = new Map(
+      mails.filter((mail) => mail.account.toLowerCase() === accountEmail.toLowerCase()).map((mail) => [mail.id, mail]),
+    );
+    let addedCount = 0;
+    for (const liveMail of liveMails) {
+      const existing = existingById.get(liveMail.id);
+      if (existing) {
+        if (existing.folder === 'drafts' && existing.draftDirty) continue;
+        Object.assign(existing, liveMail, {
+          body: liveMail.body || existing.body,
+          bodyHtml: liveMail.bodyHtml || existing.bodyHtml,
+          attachments: liveMail.attachments?.length ? liveMail.attachments : existing.attachments,
+        });
+      } else {
+        mails.push(liveMail);
+        addedCount += 1;
+      }
+    }
+    liveMailCount = addedCount;
   }
 
   // Ordenar SIEMPRE la lista completa de correos de más reciente a más antiguo
@@ -1024,8 +1119,9 @@ async function syncAccountInbox(accountEmailRaw: string, forcedProvider?: EmailP
     supabase.from('user_accounts').upsert({
       user_id: currentUser.id,
       email: accountEmail,
+      provider,
       access_token: effectiveToken || acc?.access_token || acc?.token || null,
-      refresh_token: acc?.refresh_token || null,
+      refresh_token: provider === 'gmail' ? null : acc?.refresh_token || null,
       expires_at: acc?.expires_at || null,
       is_primary: acc?.primary || false,
     }, { onConflict: 'user_id,email' }).then(({ error }) => {
@@ -1034,7 +1130,7 @@ async function syncAccountInbox(accountEmailRaw: string, forcedProvider?: EmailP
   }
 
   persist();
-  return addedCount;
+  return liveMailCount;
 }
 
 function renderAccounts(): void {
@@ -1235,6 +1331,33 @@ function handleMailAction(id: string, action: string): void {
 async function handleMailActionAsync(id: string, action: string): Promise<void> {
   const m = mails.find((x) => x.id === id);
   if (!m) return;
+  if (action === 'delete') {
+    const confirmed = await showConfirm({
+      title: t('delete_forever'),
+      message: t('confirm_delete'),
+      confirmText: t('delete_forever'),
+      danger: true,
+    });
+    if (!confirmed) return;
+  }
+
+  const account = accounts.find((item) => item.email.toLowerCase() === m.account.toLowerCase());
+  const isProviderMail = (account?.provider === 'gmail' || account?.provider === 'outlook') && !m.id.startsWith('m_');
+  if (isProviderMail && account) {
+    const token = await resolveSendToken(account);
+    if (!token) {
+      toast('La sesión del correo expiró. Vuelve a vincular la cuenta para sincronizar y modificar mensajes.');
+      return;
+    }
+    const providerAction = action === 'star' ? (m.starred ? 'unstar' : 'star')
+      : action === 'spam' || action === 'trash' || action === 'restore' || action === 'delete' ? action
+        : null;
+    if (providerAction && !(await updateRealMail(account.provider as 'gmail' | 'outlook', token, m.id, providerAction))) {
+      toast(`No se pudo modificar el correo. Vuelve a vincular ${account.provider === 'outlook' ? 'Outlook para conceder Mail.ReadWrite' : 'Gmail para conceder los permisos de correo'} e inténtalo de nuevo.`);
+      return;
+    }
+  }
+
   if (action === 'star') {
     m.starred = !m.starred;
   } else if (action === 'spam') {
@@ -1246,16 +1369,13 @@ async function handleMailActionAsync(id: string, action: string): Promise<void> 
   } else if (action === 'restore') {
     m.folder = 'inbox';
   } else if (action === 'delete') {
-    const confirmed = await showConfirm({
-      title: t('delete_forever'),
-      message: t('confirm_delete'),
-      confirmText: t('delete_forever'),
-      danger: true,
-    });
-    if (!confirmed) return;
     const idx = mails.findIndex((x) => x.id === id);
     if (idx >= 0) mails.splice(idx, 1);
     toast(t('mail_deleted'));
+  }
+  const readerStar = document.getElementById('readerHeadStar');
+  if (readerStar && document.getElementById('readerModal')?.classList.contains('open')) {
+    readerStar.textContent = m.starred ? '★' : '☆';
   }
   persist();
   renderMails();
@@ -1431,11 +1551,14 @@ function hydrateProfileForm(): void {
 }
 
 function hydrateAppearance(): void {
-  const theme = store.get<string>(KEYS.theme, 'dark');
+  const theme = document.documentElement.dataset.theme || store.get<string>(KEYS.theme, 'light');
   const accent = store.get<string>(KEYS.accent, '#e63946');
   const lang = store.get<string>(KEYS.lang, 'es');
   document.querySelectorAll<HTMLElement>('.theme-card').forEach((c) =>
     c.classList.toggle('active', c.dataset.theme === theme)
+  );
+  document.querySelectorAll<HTMLButtonElement>('.theme-card').forEach((c) =>
+    c.setAttribute('aria-pressed', String(c.dataset.theme === theme))
   );
   document.querySelectorAll<HTMLElement>('.swatch[data-color]').forEach((s) =>
     s.classList.toggle('active', s.dataset.color === accent)
@@ -1647,11 +1770,6 @@ async function sendMail(): Promise<void> {
   targetAcc.token = effToken;
   persist();
 
-  if (composingDraftId) {
-    const idx = mails.findIndex((x) => x.id === composingDraftId);
-    if (idx >= 0) mails.splice(idx, 1);
-  }
-
   const now = new Date();
   const timeStr = scheduledFor
     ? new Date(scheduledFor).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
@@ -1666,6 +1784,12 @@ async function sendMail(): Promise<void> {
     let result: SendResult;
     if (sendProvider === 'gmail') {
       result = await sendRealGmailMail(effToken, f.to, f.subject || '(Sin asunto)', bodyContent, composeAttachments);
+      if (!result.ok && result.code === 'expired_token') {
+        const refreshedToken = await refreshGoogleAccessToken(targetAcc.email);
+        if (refreshedToken) {
+          result = await sendRealGmailMail(refreshedToken, f.to, f.subject || '(Sin asunto)', bodyContent, composeAttachments);
+        }
+      }
     } else if (sendProvider === 'outlook') {
       result = await sendRealOutlookMail(effToken, f.to, f.subject || '(Sin asunto)', bodyContent, composeAttachments);
       if (!result.ok && result.code === 'expired_token' && targetAcc.refresh_token) {
@@ -1704,6 +1828,22 @@ async function sendMail(): Promise<void> {
   } else {
     toast(t('mail_scheduled'));
     sentOk = true;
+  }
+
+  if (composingDraftId && sentOk) {
+    const draftIndex = mails.findIndex((mail) => mail.id === composingDraftId);
+    const draft = draftIndex >= 0 ? mails[draftIndex] : undefined;
+    if (draft && !scheduledFor && !draft.id.startsWith('m_')) {
+      const draftAccount = accounts.find((item) => item.email.toLowerCase() === draft.account.toLowerCase());
+      const draftToken = draftAccount ? await resolveSendToken(draftAccount) : null;
+      const deleted = draftAccount && draftToken && (draftAccount.provider === 'gmail' || draftAccount.provider === 'outlook')
+        ? await updateRealMail(draftAccount.provider, draftToken, draft.id, 'delete')
+        : false;
+      if (deleted) mails.splice(draftIndex, 1);
+      else toast('El correo se envió, pero el borrador original sigue en la cuenta.');
+    } else if (draft && !scheduledFor) {
+      mails.splice(draftIndex, 1);
+    }
   }
 
   const newMailObj: Mail = {
@@ -1782,11 +1922,12 @@ function saveDraft(): void {
   const payload = {
     to: f.to,
     subject: f.subject || '(sin asunto)',
-    body: (f.body || '').split('\n')[0].slice(0, 180),
+    body: f.body || '',
     bodyHtml: f.bodyHtml,
     attachments: composeAttachments.slice(),
     time: timeStr,
     scheduledFor: scheduledFor || null,
+    draftDirty: true,
   };
   if (composingDraftId) {
     const m = mails.find((x) => x.id === composingDraftId);
@@ -1856,38 +1997,12 @@ function openReader(m: Mail): void {
     button.onclick = () => openAttachmentPreview(m.attachments![Number(button.dataset.previewAttachment)]);
   });
   const headStarBtn = document.getElementById('readerHeadStar')!;
-  const toggleStar = () => {
-    const nextStarred = !m.starred;
-    const account = accounts.find((item) => item.email.toLowerCase() === m.account.toLowerCase());
-    const token = account?.access_token || account?.token;
-    m.starred = nextStarred;
-    headStarBtn.textContent = m.starred ? '★' : '☆';
-    persist();
-    updateFolderCounts();
-    if ((account?.provider === 'gmail' || account?.provider === 'outlook') && token) {
-      void updateRealMail(account.provider, token, m.id, nextStarred ? 'star' : 'unstar').then((updated) => {
-        if (!updated) {
-        toast('No se pudo actualizar el favorito en el proveedor de correo.');
-        }
-      });
-    }
-  };
+  const toggleStar = () => void handleMailActionAsync(m.id, 'star');
   headStarBtn.textContent = m.starred ? '★' : '☆';
   headStarBtn.onclick = toggleStar;
   const moveToTrash = () => {
-    const account = accounts.find((item) => item.email.toLowerCase() === m.account.toLowerCase());
-    const token = account?.access_token || account?.token;
-    m.folder = 'trash';
-    m.starred = false;
-    persist();
+    void handleMailActionAsync(m.id, 'trash');
     closeReaderView();
-    if ((account?.provider === 'gmail' || account?.provider === 'outlook') && token) {
-      void updateRealMail(account.provider, token, m.id, 'trash').then((updated) => {
-        if (!updated) {
-        toast('No se pudo enviar el correo a la papelera.');
-        }
-      });
-    }
   };
   document.getElementById('readerHeadTrash')!.onclick = moveToTrash;
   document.getElementById('readerReply')!.onclick = () => {
@@ -2367,13 +2482,58 @@ document.addEventListener('DOMContentLoaded', async () => {
   const triggerGoogleOAuth = async () => {
     try {
       skipCloseCleanup = true;
-      // No vincular la identidad de Supabase: cada correo externo debe conservar su propio token.
-      const clientId = (import.meta as any).env.PUBLIC_GOOGLE_CLIENT_ID || (window as any).PUBLIC_GOOGLE_CLIENT_ID || '1053272205885-03ecg2aig51gds1f1va4h55n4j5t1l2l.apps.googleusercontent.com';
-      const redirectUri = encodeURIComponent(window.location.origin + window.location.pathname);
-      const scope = encodeURIComponent(GOOGLE_OAUTH_SCOPES);
-      window.location.href = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId.trim()}&redirect_uri=${redirectUri}&response_type=token&scope=${scope}&prompt=consent&access_type=online`;
+      const clientId = (import.meta as any).env.PUBLIC_GOOGLE_CLIENT_ID || (window as any).PUBLIC_GOOGLE_CLIENT_ID;
+      if (!clientId) {
+        toast('⚠️ Configura PUBLIC_GOOGLE_CLIENT_ID en .env para vincular Gmail.');
+        return;
+      }
+      const desktopApi = (window as any).triadeElectron;
+      if (!desktopApi?.startGoogleOAuth) {
+        toast('⚠️ La vinculación de Gmail requiere ejecutar Triade Mail como aplicación de escritorio.');
+        return;
+      }
+      const result = await desktopApi.startGoogleOAuth({
+        clientId: clientId.trim(),
+        scopes: GOOGLE_OAUTH_SCOPES.split(' '),
+      });
+      const userEmail = cleanUserEmail(result.account_email);
+      const accountIndex = accounts.findIndex((account) => account.email.toLowerCase() === userEmail);
+      const account: Account = accountIndex >= 0 ? accounts[accountIndex] : {
+        email: userEmail,
+        primary: accounts.length === 0,
+        provider: 'gmail',
+        status: 'connected',
+      };
+      account.provider = 'gmail';
+      account.status = 'connected';
+      account.access_token = result.access_token;
+      account.token = result.access_token;
+      account.expires_at = Date.now() + Number(result.expires_in || 3600) * 1000;
+      account.refresh_token = undefined;
+      if (accountIndex < 0) accounts.push(account);
+
+      if (currentUser) {
+        const { error } = await supabase.from('user_accounts').upsert({
+          user_id: currentUser.id,
+          email: userEmail,
+          provider: 'gmail',
+          access_token: null,
+          refresh_token: null,
+          expires_at: null,
+          is_primary: account.primary,
+        }, { onConflict: 'user_id,email' });
+        if (error) console.warn('No se pudo sincronizar la cuenta Gmail con Supabase:', error);
+      }
+
+      activeAccount = userEmail;
+      const count = await syncAccountInbox(userEmail, 'gmail', result.access_token);
+      persist();
+      renderAccounts();
+      renderMails();
+      toast(`✔ Cuenta ${userEmail} conectada con Google OAuth (${count} correos).`);
     } catch (err: any) {
-      toast('⚠️ Error al conectar con Google OAuth.');
+      console.error('Error en Google Desktop OAuth:', err);
+      toast(`⚠️ Error al conectar con Google: ${err?.message || 'error de autorización'}`);
     }
   };
 

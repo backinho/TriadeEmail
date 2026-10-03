@@ -49,6 +49,7 @@ export interface Mail {
   folder: Folder;
   attachments?: Attachment[];
   scheduledFor?: string | null;
+  draftDirty?: boolean;
 }
 
 export interface Profile {
