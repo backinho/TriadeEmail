@@ -397,7 +397,13 @@ export async function fetchRealGmailMails(
             headers: { Authorization: `Bearer ${accessToken}` },
           }
         );
-        if (!detailRes.ok) return null;
+        if (!detailRes.ok) {
+          if (detailRes.status === 403) {
+            const errText = await detailRes.text();
+            throw new Error(`Gmail API HTTP 403: ${errText}`);
+          }
+          return null;
+        }
 
         const msg = await detailRes.json();
         const headers: { name: string; value: string }[] = msg.payload?.headers || [];
@@ -473,6 +479,7 @@ export async function fetchRealGmailMails(
         };
         } catch (err) {
           console.warn(`Failed to parse Gmail message ${item.id}:`, err);
+          if (err instanceof Error && err.message.startsWith('Gmail API HTTP 403:')) throw err;
           return null;
         }
       }));

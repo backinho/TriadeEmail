@@ -983,6 +983,25 @@ function escapeHtml(s: unknown): string {
   );
 }
 
+function explainGmailForbiddenError(errorMessage: string): string {
+  const payloadText = errorMessage.replace(/^Gmail API HTTP 403:\s*/, '');
+  try {
+    const apiError = JSON.parse(payloadText)?.error;
+    const reasons = (apiError?.errors || []).map((item: { reason?: string }) => item.reason || '').join(' ');
+    const details = `${apiError?.status || ''} ${apiError?.message || ''} ${reasons}`.toLowerCase();
+    if (details.includes('accessnotconfigured') || details.includes('service_disabled') || details.includes('has not been used')) {
+      return 'La Gmail API está desactivada en el proyecto de Google Cloud del Client ID. Habilítala y vuelve a sincronizar.';
+    }
+    if (details.includes('insufficientpermissions') || details.includes('insufficient authentication scopes') || details.includes('access_not_granted')) {
+      return 'El consentimiento no concedió los permisos de Gmail necesarios. Desvincula la cuenta y vuelve a autorizarla.';
+    }
+    if (apiError?.message) return `Google: ${apiError.message}`;
+  } catch {
+    // Keep a readable fallback when Google returns a non-JSON error.
+  }
+  return 'Google rechazó la solicitud de Gmail. Revisa que Gmail API esté habilitada y vuelve a vincular la cuenta.';
+}
+
 async function syncAccountInbox(accountEmailRaw: string, forcedProvider?: EmailProvider, token?: string): Promise<number> {
   const accountEmail = cleanUserEmail(accountEmailRaw);
   if (!accountEmail || !accountEmail.includes('@')) return 0;
@@ -1113,7 +1132,7 @@ async function syncAccountInbox(accountEmailRaw: string, forcedProvider?: EmailP
       if (!liveMails.length) {
         const reason = provider === 'gmail'
           ? gmailStatus === '403'
-            ? 'Google rechazó los permisos de Gmail. Revisa el consentimiento OAuth y vuelve a vincular la cuenta.'
+            ? explainGmailForbiddenError(errorMessage)
             : gmailStatus === '429'
               ? 'Google limitó temporalmente las consultas. Espera un momento y sincroniza otra vez.'
               : gmailStatus === '401'
