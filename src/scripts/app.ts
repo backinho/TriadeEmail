@@ -927,14 +927,17 @@ function folderMails(folder: string): Mail[] {
   });
 }
 
-function isOutlookMail(mail: Mail): boolean {
+function isLiveProviderMail(mail: Mail): boolean {
   const account = accounts.find((item) => item.email.toLowerCase() === mail.account.toLowerCase());
-  return account?.provider === 'outlook' || inferProvider(mail.account) === 'outlook';
+  const provider = account?.provider === 'gmail' || account?.provider === 'outlook'
+    ? account.provider
+    : inferProvider(mail.account);
+  return provider === 'gmail' || provider === 'outlook';
 }
 
 function baseFiltered(): Mail[] {
   return folderMails(activeFolder).filter((m) => {
-    if (!isOutlookMail(m)) return false;
+    if (!isLiveProviderMail(m)) return false;
     if (activeAccount !== 'all' && m.account !== activeAccount) return false;
     if (searchQuery) {
       const q = searchQuery.toLowerCase();
@@ -967,7 +970,7 @@ function countMailsForTab(tabId: string): number {
 function updateFolderCounts(): void {
   document.querySelectorAll<HTMLElement>('[data-count]').forEach((el) => {
     const f = el.dataset.count!;
-    const n = folderMails(f).filter(isOutlookMail).length;
+    const n = folderMails(f).filter(isLiveProviderMail).length;
     el.textContent = String(n);
     el.style.display = n ? '' : 'none';
   });
@@ -1309,13 +1312,13 @@ function renderMails(): void {
   updateFolderCounts();
   const list = document.getElementById('mailList')!;
 
-  if (!accounts.some((account) => account.provider === 'outlook' || inferProvider(account.email) === 'outlook')) {
+  if (!accounts.some(isLiveProviderAccount)) {
     list.innerHTML = `
       <div class="empty-state" style="padding: 3rem 1.5rem; text-align: center;">
         <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="margin-bottom: 1rem; opacity: 0.85;"><rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
         <h3 style="margin-bottom:0.5rem">No has registrado ninguna cuenta de correo</h3>
-        <p class="hint" style="max-width: 420px; margin: 0 auto 1.5rem auto;">Conecta tu cuenta de Outlook para centralizar tus mensajes en Triade.</p>
-        <button class="btn primary" id="emptyStateConnectBtn">Conectar cuenta de Outlook</button>
+        <p class="hint" style="max-width: 420px; margin: 0 auto 1.5rem auto;">Conecta tu cuenta de Google o Microsoft para centralizar tus mensajes en Triade.</p>
+        <button class="btn primary" id="emptyStateConnectBtn">Conectar cuenta de correo</button>
       </div>`;
     const btn = document.getElementById('emptyStateConnectBtn');
     if (btn) {
