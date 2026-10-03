@@ -103,10 +103,13 @@ function receiveGoogleCallback(server, expectedState, timeout) {
   });
 }
 
-ipcMain.handle('google-oauth:start', async (event, { clientId, scopes }) => {
+ipcMain.handle('google-oauth:start', async (event, { clientId, clientSecret, scopes }) => {
   assertTrustedRenderer(event);
   if (!clientId || typeof clientId !== 'string' || !clientId.endsWith('.apps.googleusercontent.com')) {
     throw new Error('Configura un OAuth client ID de tipo Desktop app.');
+  }
+  if (typeof clientSecret !== 'string' || !clientSecret.trim()) {
+    throw new Error('Falta PUBLIC_GOOGLE_CLIENT_SECRET. Cópialo del JSON de credenciales OAuth Desktop de Google Cloud.');
   }
   if (!Array.isArray(scopes) || scopes.some((scope) => typeof scope !== 'string' || !allowedGoogleScopes.has(scope))) {
     throw new Error('Scopes de Google inválidos.');
@@ -149,6 +152,7 @@ ipcMain.handle('google-oauth:start', async (event, { clientId, scopes }) => {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
         client_id: clientId,
+        client_secret: clientSecret.trim(),
         code,
         code_verifier: verifier,
         redirect_uri: redirectUri,
@@ -183,7 +187,7 @@ ipcMain.handle('google-oauth:start', async (event, { clientId, scopes }) => {
   }
 });
 
-ipcMain.handle('google-oauth:refresh', async (event, email, clientId) => {
+ipcMain.handle('google-oauth:refresh', async (event, email, clientId, clientSecret) => {
   assertTrustedRenderer(event);
   const accountEmail = String(email || '').trim().toLowerCase();
   const tokens = await readGoogleTokens();
@@ -193,11 +197,15 @@ ipcMain.handle('google-oauth:refresh', async (event, email, clientId) => {
   if (typeof clientId !== 'string' || !clientId.endsWith('.apps.googleusercontent.com')) {
     throw new Error('Falta PUBLIC_GOOGLE_CLIENT_ID en la configuración de la app.');
   }
+  if (typeof clientSecret !== 'string' || !clientSecret.trim()) {
+    throw new Error('Falta PUBLIC_GOOGLE_CLIENT_SECRET en la configuración de la app.');
+  }
   const response = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
       client_id: clientId,
+      client_secret: clientSecret.trim(),
       refresh_token: refreshToken,
       grant_type: 'refresh_token',
     }),

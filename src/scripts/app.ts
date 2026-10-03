@@ -422,13 +422,14 @@ async function resolveSendToken(acc: Account): Promise<string | null> {
 async function refreshGoogleAccessToken(accountEmail: string): Promise<string | null> {
   const desktopApi = (window as any).triadeElectron;
   const clientId = (import.meta as any).env.PUBLIC_GOOGLE_CLIENT_ID || (window as any).PUBLIC_GOOGLE_CLIENT_ID;
-  if (!desktopApi?.refreshGoogleToken || !clientId) {
-    console.warn('La renovación de Google solo está disponible en Triade Mail para escritorio.');
+  const clientSecret = (import.meta as any).env.PUBLIC_GOOGLE_CLIENT_SECRET || (window as any).PUBLIC_GOOGLE_CLIENT_SECRET;
+  if (!desktopApi?.refreshGoogleToken || !clientId || !clientSecret) {
+    console.warn('Falta la configuración OAuth de Google Desktop en la aplicación.');
     return null;
   }
   let data: { access_token?: string; expires_in?: number };
   try {
-    data = await desktopApi.refreshGoogleToken(accountEmail.toLowerCase(), clientId);
+    data = await desktopApi.refreshGoogleToken(accountEmail.toLowerCase(), clientId, clientSecret);
   } catch (error) {
     console.warn('No se pudo renovar el token de Google:', error);
     return null;
@@ -926,8 +927,14 @@ function folderMails(folder: string): Mail[] {
   });
 }
 
+function isOutlookMail(mail: Mail): boolean {
+  const account = accounts.find((item) => item.email.toLowerCase() === mail.account.toLowerCase());
+  return account?.provider === 'outlook' || inferProvider(mail.account) === 'outlook';
+}
+
 function baseFiltered(): Mail[] {
   return folderMails(activeFolder).filter((m) => {
+    if (!isOutlookMail(m)) return false;
     if (activeAccount !== 'all' && m.account !== activeAccount) return false;
     if (searchQuery) {
       const q = searchQuery.toLowerCase();
@@ -960,7 +967,7 @@ function countMailsForTab(tabId: string): number {
 function updateFolderCounts(): void {
   document.querySelectorAll<HTMLElement>('[data-count]').forEach((el) => {
     const f = el.dataset.count!;
-    const n = folderMails(f).length;
+    const n = folderMails(f).filter(isOutlookMail).length;
     el.textContent = String(n);
     el.style.display = n ? '' : 'none';
   });
@@ -1180,6 +1187,7 @@ function renderAccounts(): void {
   };
   list.appendChild(chipAll);
   accounts.forEach((a) => {
+    if (a.provider !== 'outlook' && inferProvider(a.email) !== 'outlook') return;
     const el = document.createElement('div');
     el.className = 'acct-chip' + (activeAccount === a.email ? ' active' : '');
     const badge = a.provider === 'gmail' ? ' 🔴' : a.provider === 'outlook' ? ' 🔵' : '';
@@ -1197,6 +1205,7 @@ function renderAccounts(): void {
   if (edit) {
     edit.innerHTML = '';
     accounts.forEach((a, i) => {
+      if (a.provider !== 'outlook' && inferProvider(a.email) !== 'outlook') return;
       const row = document.createElement('div');
       row.className = 'account-item';
       const providerLabel = a.provider === 'gmail' ? 'Gmail' : a.provider === 'outlook' ? 'Outlook' : 'Email';
@@ -1268,13 +1277,13 @@ function renderMails(): void {
   updateFolderCounts();
   const list = document.getElementById('mailList')!;
 
-  if (!accounts.length) {
+  if (!accounts.some((account) => account.provider === 'outlook' || inferProvider(account.email) === 'outlook')) {
     list.innerHTML = `
       <div class="empty-state" style="padding: 3rem 1.5rem; text-align: center;">
         <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="margin-bottom: 1rem; opacity: 0.85;"><rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
         <h3 style="margin-bottom:0.5rem">No has registrado ninguna cuenta de correo</h3>
-        <p class="hint" style="max-width: 420px; margin: 0 auto 1.5rem auto;">Conecta tu correo de Gmail u Outlook para obtener todos tus mensajes en la bandeja centralizada.</p>
-        <button class="btn primary" id="emptyStateConnectBtn">Registrar correo de Gmail u Outlook</button>
+        <p class="hint" style="max-width: 420px; margin: 0 auto 1.5rem auto;">Conecta tu cuenta de Outlook para centralizar tus mensajes en Triade.</p>
+        <button class="btn primary" id="emptyStateConnectBtn">Conectar cuenta de Outlook</button>
       </div>`;
     const btn = document.getElementById('emptyStateConnectBtn');
     if (btn) {
@@ -2516,8 +2525,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     try {
       skipCloseCleanup = true;
       const clientId = (import.meta as any).env.PUBLIC_GOOGLE_CLIENT_ID || (window as any).PUBLIC_GOOGLE_CLIENT_ID;
-      if (!clientId) {
-        toast('⚠️ Configura PUBLIC_GOOGLE_CLIENT_ID en .env para vincular Gmail.');
+      const clientSecret = (import.meta as any).env.PUBLIC_GOOGLE_CLIENT_SECRET || (window as any).PUBLIC_GOOGLE_CLIENT_SECRET;
+      if (!clientId || !clientSecret) {
+        toast('⚠️ Configura PUBLIC_GOOGLE_CLIENT_ID y PUBLIC_GOOGLE_CLIENT_SECRET en .env.');
         return;
       }
       const desktopApi = (window as any).triadeElectron;
@@ -2527,6 +2537,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
       const result = await desktopApi.startGoogleOAuth({
         clientId: clientId.trim(),
+        clientSecret: clientSecret.trim(),
         scopes: GOOGLE_OAUTH_SCOPES.split(' '),
       });
       const userEmail = cleanUserEmail(result.account_email);
