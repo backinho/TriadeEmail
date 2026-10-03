@@ -356,7 +356,11 @@ export async function sendRealOutlookMail(
  * Extracts real live emails from Google Gmail API (Inbox, Sent, Drafts, Spam, Trash)
  * Endpoint: https://gmail.googleapis.com/gmail/v1/users/me/messages
  */
-export async function fetchRealGmailMails(accessToken: string, accountEmail: string): Promise<Mail[]> {
+export async function fetchRealGmailMails(
+  accessToken: string,
+  accountEmail: string,
+  onBatch?: (batch: Mail[]) => void,
+): Promise<Mail[]> {
   try {
     const messageSummaries: { id: string; threadId: string }[] = [];
     let pageToken = '';
@@ -381,16 +385,19 @@ export async function fetchRealGmailMails(accessToken: string, accountEmail: str
 
     const fetchedMails: Mail[] = [];
 
-    // Fetch detail for messages
-    for (const item of messageSummaries) {
-      try {
+    // Fetch details in small concurrent batches so the UI can render progressively.
+    const batchSize = 8;
+    for (let offset = 0; offset < messageSummaries.length; offset += batchSize) {
+      const summaries = messageSummaries.slice(offset, offset + batchSize);
+      const batch = await Promise.all(summaries.map(async (item): Promise<Mail | null> => {
+        try {
         const detailRes = await fetch(
           `https://gmail.googleapis.com/gmail/v1/users/me/messages/${item.id}?format=full`,
           {
             headers: { Authorization: `Bearer ${accessToken}` },
           }
         );
-        if (!detailRes.ok) continue;
+        if (!detailRes.ok) return null;
 
         const msg = await detailRes.json();
         const headers: { name: string; value: string }[] = msg.payload?.headers || [];
@@ -448,7 +455,7 @@ export async function fetchRealGmailMails(accessToken: string, accountEmail: str
         const finalBodyText = bodyText || snippet || '(Sin contenido)';
         const finalBodyHtml = bodyHtml || undefined;
 
-        fetchedMails.push({
+        return {
           id: item.id || uid('m'),
           from: senderName,
           fromEmail: senderEmail,
@@ -463,10 +470,15 @@ export async function fetchRealGmailMails(accessToken: string, accountEmail: str
           starred: isStarred,
           folder: folder,
           attachments,
-        });
-      } catch (err) {
-        console.warn(`Failed to parse Gmail message ${item.id}:`, err);
-      }
+        };
+        } catch (err) {
+          console.warn(`Failed to parse Gmail message ${item.id}:`, err);
+          return null;
+        }
+      }));
+      const successfulBatch = batch.filter((mail): mail is Mail => mail !== null);
+      fetchedMails.push(...successfulBatch);
+      if (successfulBatch.length) onBatch?.(successfulBatch);
     }
 
     // Ordenar siempre de más reciente a más antiguo (timestamp descendente)

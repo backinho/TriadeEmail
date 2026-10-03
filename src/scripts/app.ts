@@ -1041,11 +1041,32 @@ async function syncAccountInbox(accountEmailRaw: string, forcedProvider?: EmailP
   }
 
   let liveMails: Mail[] = [];
+  let liveMailCount = 0;
 
   if (effectiveToken) {
     try {
       if (provider === 'gmail') {
-        liveMails = await fetchRealGmailMails(effectiveToken, accountEmail);
+        liveMails = await fetchRealGmailMails(effectiveToken, accountEmail, (batch) => {
+          const existingById = new Map(
+            mails.filter((mail) => mail.account.toLowerCase() === accountEmail).map((mail) => [mail.id, mail]),
+          );
+          for (const liveMail of batch) {
+            const existing = existingById.get(liveMail.id);
+            if (existing) {
+              Object.assign(existing, liveMail, {
+                body: liveMail.body || existing.body,
+                bodyHtml: liveMail.bodyHtml || existing.bodyHtml,
+                attachments: liveMail.attachments?.length ? liveMail.attachments : existing.attachments,
+              });
+            } else {
+              mails.push(liveMail);
+              existingById.set(liveMail.id, liveMail);
+              liveMailCount += 1;
+            }
+          }
+          mails.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+          renderMails();
+        });
       } else if (provider === 'outlook') {
         try {
           liveMails = await fetchRealOutlookMails(effectiveToken, accountEmail);
@@ -1067,7 +1088,9 @@ async function syncAccountInbox(accountEmailRaw: string, forcedProvider?: EmailP
       }
     } catch (err: any) {
       console.warn('Could not fetch live mails with token:', err);
-      if (provider === 'gmail' && String(err?.message || '').includes('HTTP 401')) {
+      const errorMessage = String(err?.message || '');
+      const gmailStatus = errorMessage.match(/Gmail API HTTP (\d+)/)?.[1];
+      if (provider === 'gmail' && gmailStatus === '401') {
         const refreshedToken = await refreshGoogleAccessToken(accountEmail);
         if (refreshedToken) {
           effectiveToken = refreshedToken;
@@ -1080,7 +1103,18 @@ async function syncAccountInbox(accountEmailRaw: string, forcedProvider?: EmailP
       } else if (provider === 'outlook') {
         clearOutlookCachedSession(accountEmail);
       }
-      if (!liveMails.length) toast(`⚠️ Error al conectar con ${provider === 'gmail' ? 'Gmail' : 'Outlook'} API (${accountEmail}): La sesión del correo ha expirado. Vuelve a vincular la cuenta.`);
+      if (!liveMails.length) {
+        const reason = provider === 'gmail'
+          ? gmailStatus === '403'
+            ? 'Google rechazó los permisos de Gmail. Revisa el consentimiento OAuth y vuelve a vincular la cuenta.'
+            : gmailStatus === '429'
+              ? 'Google limitó temporalmente las consultas. Espera un momento y sincroniza otra vez.'
+              : gmailStatus === '401'
+                ? 'La sesión de Gmail venció. Desvincula la cuenta y vuelve a autorizarla.'
+                : errorMessage || 'Error de conexión con Gmail.'
+          : 'La sesión del correo ha expirado. Vuelve a vincular la cuenta.';
+        toast(`⚠️ Error al sincronizar ${accountEmail}: ${reason}`, 6000);
+      }
     }
   } else {
     console.warn(`No active live token found for ${accountEmail} (${provider}).`);
@@ -1089,7 +1123,6 @@ async function syncAccountInbox(accountEmailRaw: string, forcedProvider?: EmailP
     }
   }
 
-  let liveMailCount = 0;
   if (liveMails.length > 0) {
     const existingById = new Map(
       mails.filter((mail) => mail.account.toLowerCase() === accountEmail.toLowerCase()).map((mail) => [mail.id, mail]),
@@ -1109,7 +1142,7 @@ async function syncAccountInbox(accountEmailRaw: string, forcedProvider?: EmailP
         addedCount += 1;
       }
     }
-    liveMailCount = addedCount;
+    liveMailCount += addedCount;
   }
 
   // Ordenar SIEMPRE la lista completa de correos de más reciente a más antiguo
@@ -1120,9 +1153,9 @@ async function syncAccountInbox(accountEmailRaw: string, forcedProvider?: EmailP
       user_id: currentUser.id,
       email: accountEmail,
       provider,
-      access_token: effectiveToken || acc?.access_token || acc?.token || null,
+      access_token: provider === 'gmail' ? null : effectiveToken || acc?.access_token || acc?.token || null,
       refresh_token: provider === 'gmail' ? null : acc?.refresh_token || null,
-      expires_at: acc?.expires_at || null,
+      expires_at: provider === 'gmail' ? null : acc?.expires_at || null,
       is_primary: acc?.primary || false,
     }, { onConflict: 'user_id,email' }).then(({ error }) => {
       if (error) console.warn('Error al actualizar cuenta en Supabase:', error);
@@ -2526,11 +2559,20 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
 
       activeAccount = userEmail;
+      currentPage = 1;
+      renderAccounts();
+      renderMails();
+      toast(`✔ ${userEmail} vinculada. Sincronizando mensajes...`);
       const count = await syncAccountInbox(userEmail, 'gmail', result.access_token);
       persist();
       renderAccounts();
       renderMails();
-      toast(`✔ Cuenta ${userEmail} conectada con Google OAuth (${count} correos).`);
+      const visibleCount = mails.filter((mail) => mail.account.toLowerCase() === userEmail).length;
+      toast(count > 0
+        ? `✔ Cuenta ${userEmail} conectada. ${count} correos nuevos; ${visibleCount} disponibles.`
+        : visibleCount > 0
+          ? `✔ Cuenta ${userEmail} conectada. ${visibleCount} correos disponibles.`
+          : `✔ Cuenta ${userEmail} conectada. No se encontraron mensajes en la cuenta.`);
     } catch (err: any) {
       console.error('Error en Google Desktop OAuth:', err);
       toast(`⚠️ Error al conectar con Google: ${err?.message || 'error de autorización'}`);
