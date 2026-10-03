@@ -798,6 +798,11 @@ button:focus-visible, a:focus-visible, [role="button"]:focus-visible{
   background: linear-gradient(135deg, #ea4335, #d93025) !important;
 }
 
+#settingsGoogleOAuthBtn,
+#settingsMicrosoftOAuthBtn {
+  width: auto !important;
+}
+
 .oauth-btn.microsoft {
   background: linear-gradient(135deg, #00a4ef, #0078d4) !important;
 }
