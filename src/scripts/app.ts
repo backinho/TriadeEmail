@@ -3,7 +3,7 @@ import {
   type Account, type Category, type Profile, type Mail, type Attachment, type Folder, type EmailProvider,
 } from './common';
 import { supabase, supabaseUrl, supabaseAnonKey } from './supabase';
-import { fetchRealGmailMails, fetchRealOutlookMails, sendRealGmailMail, sendRealOutlookMail, updateRealMail, type SendResult } from './emailApi';
+import { fetchRealGmailMails, fetchRealOutlookMails, fetchRealOutlookAttachments, fetchRealOutlookMessageBody, sendRealGmailMail, sendRealOutlookMail, updateRealMail, type SendResult } from './emailApi';
 import { toast } from './notifications';
 
 
@@ -113,6 +113,7 @@ const persist = (): void => {
     subject: m.subject,
     body: m.folder === 'drafts' ? (m.body || '') : (m.body || '').slice(0, 500),
     bodyHtml: m.folder === 'drafts' ? m.bodyHtml : undefined,
+    bodyLoaded: m.bodyLoaded,
     draftDirty: m.draftDirty,
     account: m.account,
     time: m.time,
@@ -121,6 +122,7 @@ const persist = (): void => {
     starred: m.starred,
     folder: m.folder,
     attachments: m.folder === 'drafts' ? m.attachments : undefined,
+    hasAttachments: m.hasAttachments,
   }));
   store.set(KEYS.mails, lightMails);
 
@@ -648,7 +650,7 @@ async function handleDirectOAuthRedirect(): Promise<boolean> {
       const unlinked = store.get<string[]>(KEYS.unlinked, []).filter((e) => e.toLowerCase() !== userEmail!.toLowerCase());
       store.set(KEYS.unlinked, unlinked);
 
-      const provider: EmailProvider = (userEmail.includes('outlook') || userEmail.includes('hotmail') || userEmail.includes('live') || userEmail.includes('onmicrosoft.com')) ? 'outlook' : 'gmail';
+      const provider: EmailProvider = tokenToUse.startsWith('ya29') ? 'gmail' : 'outlook';
       const accIndex = accounts.findIndex((a) => a.email.toLowerCase() === userEmail!.toLowerCase());
       if (accIndex !== -1) {
         accounts[accIndex].token = tokenToUse;
@@ -753,7 +755,12 @@ async function syncSupabaseData(): Promise<void> {
           // Si el correo guardado en DB tenía la cadena sucia #ext#, eliminar la fila antigua en Supabase
           supabase.from('user_accounts').delete().eq('id', a.id).then(() => {});
         }
-        const accountProvider = a.provider || ((cleanE.includes('gmail') || cleanE.includes('googlemail')) ? 'gmail' as EmailProvider : (cleanE.includes('outlook') || cleanE.includes('hotmail') || cleanE.includes('live') || cleanE.includes('onmicrosoft.com')) ? 'outlook' as EmailProvider : 'custom' as EmailProvider);
+        const tokenProvider: EmailProvider | undefined = a.access_token?.startsWith('ya29')
+          ? 'gmail'
+          : a.access_token && !a.access_token.startsWith('eyJ')
+            ? 'outlook'
+            : undefined;
+        const accountProvider = tokenProvider || a.provider || ((cleanE.includes('gmail') || cleanE.includes('googlemail')) ? 'gmail' as EmailProvider : (cleanE.includes('outlook') || cleanE.includes('hotmail') || cleanE.includes('live') || cleanE.includes('onmicrosoft.com')) ? 'outlook' as EmailProvider : 'custom' as EmailProvider);
         return {
           id: a.id,
           user_id: a.user_id,
@@ -806,7 +813,7 @@ async function syncSupabaseData(): Promise<void> {
 
         // Solo restaurar la cuenta si NO fue desvinculada explícitamente por el usuario
         if (!unlinkedSet.has(cleanEmail)) {
-          const provider: EmailProvider = (cleanEmail.includes('outlook') || cleanEmail.includes('hotmail') || cleanEmail.includes('live')) ? 'outlook' : 'gmail';
+          const provider: EmailProvider = providerToken.startsWith('ya29') ? 'gmail' : 'outlook';
           const existingAcc = accounts.find((a) => a.email.toLowerCase() === cleanEmail);
 
           if (!existingAcc) {
@@ -819,6 +826,7 @@ async function syncSupabaseData(): Promise<void> {
               token: providerToken,
             });
           } else {
+            existingAcc.provider = provider;
             existingAcc.access_token = providerToken;
             existingAcc.token = providerToken;
             existingAcc.status = 'connected';
@@ -1168,8 +1176,9 @@ async function syncAccountInbox(accountEmailRaw: string, forcedProvider?: EmailP
       if (existing) {
         if (existing.folder === 'drafts' && existing.draftDirty) continue;
         Object.assign(existing, liveMail, {
-          body: liveMail.body || existing.body,
-          bodyHtml: liveMail.bodyHtml || existing.bodyHtml,
+          body: existing.bodyLoaded ? existing.body : liveMail.body || existing.body,
+          bodyHtml: existing.bodyLoaded ? existing.bodyHtml : liveMail.bodyHtml || existing.bodyHtml,
+          bodyLoaded: existing.bodyLoaded || liveMail.bodyLoaded,
           attachments: liveMail.attachments?.length ? liveMail.attachments : existing.attachments,
         });
       } else {
@@ -2043,6 +2052,7 @@ function discardCompose(): void {
 function openReader(m: Mail): void {
   const modal = document.getElementById('readerModal')!;
   const main = document.querySelector<HTMLElement>('.main')!;
+  modal.dataset.mailId = m.id;
   document.getElementById('readerSubject')!.textContent = repairMojibake(m.subject || '(sin asunto)');
   document.getElementById('readerFromName')!.textContent = repairMojibake(m.from || '—');
   document.getElementById('readerFromEmail')!.textContent = repairMojibake(m.fromEmail || m.to || '');
@@ -2105,6 +2115,35 @@ function openReader(m: Mail): void {
   modal.classList.add('open');
   modal.setAttribute('aria-hidden', 'false');
   main.classList.add('reader-open');
+
+  if (!m.bodyLoaded || (m.hasAttachments && !m.attachments?.length)) {
+    const account = accounts.find((item) => item.email.toLowerCase() === m.account.toLowerCase());
+    if (account?.provider === 'outlook') {
+      void (async () => {
+        const token = await resolveSendToken(account);
+        if (!token) return;
+        const bodyPromise = !m.bodyLoaded
+          ? fetchRealOutlookMessageBody(token, m.id)
+          : Promise.resolve(null);
+        const attachmentsPromise = m.hasAttachments && !m.attachments?.length
+          ? fetchRealOutlookAttachments(token, m.id)
+          : Promise.resolve(null);
+        const [details, attachments] = await Promise.all([bodyPromise, attachmentsPromise]);
+        if (details) {
+          m.body = details.body || m.body;
+          m.bodyHtml = details.bodyHtml;
+          m.bodyLoaded = true;
+          m.hasAttachments = details.hasAttachments;
+        }
+        if (attachments) {
+          m.attachments = attachments;
+          m.hasAttachments = attachments.length > 0;
+        }
+        persist();
+        if (modal.classList.contains('open') && modal.dataset.mailId === m.id) openReader(m);
+      })().catch((error) => console.warn('Could not load Outlook attachments:', error));
+    }
+  }
 }
 
 function closeReaderView(): void {

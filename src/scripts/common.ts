@@ -41,6 +41,7 @@ export interface Mail {
   subject: string;
   body: string;
   bodyHtml?: string;
+  bodyLoaded?: boolean;
   account: string;
   time: string;
   timestamp?: number;
@@ -48,6 +49,7 @@ export interface Mail {
   starred: boolean;
   folder: Folder;
   attachments?: Attachment[];
+  hasAttachments?: boolean;
   scheduledFor?: string | null;
   draftDirty?: boolean;
 }

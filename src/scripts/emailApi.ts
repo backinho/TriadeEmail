@@ -430,12 +430,9 @@ export async function fetchRealGmailMails(
 
         const internalTs = Number(msg.internalDate) || (dateHeader ? new Date(dateHeader.value).getTime() : Date.now());
         const dateObj = new Date(internalTs);
-        const isToday = dateObj.toDateString() === new Date().toDateString();
         const timeLabel = isNaN(dateObj.getTime())
-          ? new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-          : isToday
-            ? dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-            : dateObj.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ', ' + dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          ? new Date().toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' }) + ', ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          : dateObj.toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' }) + ', ' + dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
         const labelIds: string[] = msg.labelIds || [];
         const isUnread = labelIds.includes('UNREAD');
@@ -543,7 +540,7 @@ async function loadOutlookAttachment(accessToken: string, messageId: string, att
   }
 }
 
-async function loadOutlookMessageAttachments(accessToken: string, messageId: string): Promise<Attachment[]> {
+export async function fetchRealOutlookAttachments(accessToken: string, messageId: string): Promise<Attachment[]> {
   try {
     const listRes = await fetch(
       `https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(messageId)}/attachments?$select=id,name,contentType,size,isInline`,
@@ -558,21 +555,34 @@ async function loadOutlookMessageAttachments(accessToken: string, messageId: str
 
     const listData = await listRes.json();
     const attachments: any[] = listData.value || [];
-    const loaded: Attachment[] = [];
-
-    for (const attachment of attachments) {
-      if (!attachment || attachment.isInline) continue;
-      const resolved = await loadOutlookAttachment(accessToken, messageId, attachment);
-      if (resolved) {
-        loaded.push(resolved);
-      }
-    }
-
-    return loaded;
+    const loaded = await Promise.all(attachments
+      .filter((attachment) => attachment && !attachment.isInline)
+      .map((attachment) => loadOutlookAttachment(accessToken, messageId, attachment)));
+    return loaded.filter((attachment): attachment is Attachment => attachment !== null);
   } catch (err) {
     console.warn('Failed to fetch Outlook message attachments:', err);
     return [];
   }
+}
+
+export async function fetchRealOutlookMessageBody(
+  accessToken: string,
+  messageId: string,
+): Promise<{ body: string; bodyHtml?: string; hasAttachments: boolean }> {
+  const response = await fetch(
+    `https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(messageId)}?$select=body,hasAttachments`,
+    { headers: { Authorization: `Bearer ${accessToken}`, Prefer: 'IdType="ImmutableId"' } },
+  );
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Microsoft Graph API HTTP ${response.status}: ${errorText}`);
+  }
+  const message = await response.json();
+  return {
+    body: message.body?.content || '',
+    bodyHtml: message.body?.contentType === 'html' ? message.body.content : undefined,
+    hasAttachments: Boolean(message.hasAttachments),
+  };
 }
 
 export async function fetchRealOutlookMails(accessToken: string, accountEmail: string): Promise<Mail[]> {
@@ -585,8 +595,8 @@ export async function fetchRealOutlookMails(accessToken: string, accountEmail: s
       { id: 'deleteditems', folder: 'trash' },
     ];
     const items: { message: any; folder: Folder }[] = [];
-    const select = 'id,subject,bodyPreview,body,from,toRecipients,receivedDateTime,sentDateTime,isRead,flag,isDraft';
-    for (const folder of folders) {
+    const select = 'id,subject,bodyPreview,from,toRecipients,receivedDateTime,sentDateTime,isRead,flag,isDraft,hasAttachments';
+    await Promise.all(folders.map(async (folder) => {
       let nextUrl: string | null = `https://graph.microsoft.com/v1.0/me/mailFolders/${folder.id}/messages?$top=100&$select=${select}`;
       for (let page = 0; nextUrl && page < 10; page += 1) {
         const pageUrl: string = nextUrl;
@@ -602,7 +612,7 @@ export async function fetchRealOutlookMails(accessToken: string, accountEmail: s
         items.push(...(data.value || []).map((message: any) => ({ message, folder: folder.folder })));
         nextUrl = data['@odata.nextLink'] || null;
       }
-    }
+    }));
 
     const fetchedMails: Mail[] = [];
 
@@ -612,10 +622,8 @@ export async function fetchRealOutlookMails(accessToken: string, accountEmail: s
       const toAddress = m.toRecipients?.[0]?.emailAddress?.address || accountEmail;
       const dateObj = m.receivedDateTime ? new Date(m.receivedDateTime) : (m.sentDateTime ? new Date(m.sentDateTime) : new Date());
       const timeLabel = isNaN(dateObj.getTime())
-        ? new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-        : dateObj.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-
-      const attachments = await loadOutlookMessageAttachments(accessToken, m.id || '');
+        ? new Date().toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' }) + ' ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        : dateObj.toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' }) + ' ' + dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
       const timestampNum = !isNaN(dateObj.getTime()) ? dateObj.getTime() : Date.now();
 
@@ -625,15 +633,17 @@ export async function fetchRealOutlookMails(accessToken: string, accountEmail: s
         fromEmail: senderEmail,
         to: toAddress,
         subject: m.subject || '(Sin asunto)',
-        body: m.bodyPreview || (m.body?.content ? m.body.content.replace(/<[^>]+>/g, '').slice(0, 200) : ''),
-        bodyHtml: m.body?.contentType === 'html' ? m.body.content : undefined,
+        body: m.bodyPreview || '',
+        bodyLoaded: false,
+        bodyHtml: undefined,
         account: accountEmail,
         time: timeLabel,
         timestamp: timestampNum,
         unread: !m.isRead,
         starred: m.flag?.flagStatus === 'flagged',
         folder: m.isDraft ? 'drafts' : folder,
-        attachments,
+        attachments: [],
+        hasAttachments: Boolean(m.hasAttachments),
       });
     }
 
