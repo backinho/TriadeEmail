@@ -360,35 +360,31 @@ export async function fetchRealGmailMails(
   accessToken: string,
   accountEmail: string,
   onBatch?: (batch: Mail[]) => void,
+  cachedMessageIds: ReadonlySet<string> = new Set(),
 ): Promise<Mail[]> {
   try {
     const messageSummaries: { id: string; threadId: string }[] = [];
-    let pageToken = '';
-    for (let page = 0; page < 20; page += 1) {
-      const params = new URLSearchParams({ maxResults: '100', includeSpamTrash: 'true' });
-      if (pageToken) params.set('pageToken', pageToken);
-      const listRes = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages?${params}`, {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      });
-      if (!listRes.ok) {
-        const errText = await listRes.text();
-        console.warn('Error fetching Gmail messages list:', listRes.status, errText);
-        throw new Error(`Gmail API HTTP ${listRes.status}: ${errText}`);
-      }
-      const listData = await listRes.json();
-      messageSummaries.push(...(listData.messages || []));
-      pageToken = listData.nextPageToken || '';
-      if (!pageToken) break;
+    const params = new URLSearchParams({ maxResults: '50', includeSpamTrash: 'true' });
+    const listRes = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages?${params}`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!listRes.ok) {
+      const errText = await listRes.text();
+      console.warn('Error fetching Gmail messages list:', listRes.status, errText);
+      throw new Error(`Gmail API HTTP ${listRes.status}: ${errText}`);
     }
+    const listData = await listRes.json();
+    messageSummaries.push(...(listData.messages || []));
 
-    if (!messageSummaries.length) return [];
+    const uncachedSummaries = messageSummaries.filter((item) => !cachedMessageIds.has(item.id));
+    if (!uncachedSummaries.length) return [];
 
     const fetchedMails: Mail[] = [];
 
     // Fetch details in small concurrent batches so the UI can render progressively.
-    const batchSize = 8;
-    for (let offset = 0; offset < messageSummaries.length; offset += batchSize) {
-      const summaries = messageSummaries.slice(offset, offset + batchSize);
+    const batchSize = 2;
+    for (let offset = 0; offset < uncachedSummaries.length; offset += batchSize) {
+      const summaries = uncachedSummaries.slice(offset, offset + batchSize);
       const batch = await Promise.all(summaries.map(async (item): Promise<Mail | null> => {
         try {
         const detailRes = await fetch(

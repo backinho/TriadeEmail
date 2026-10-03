@@ -989,6 +989,9 @@ function explainGmailForbiddenError(errorMessage: string): string {
     const apiError = JSON.parse(payloadText)?.error;
     const reasons = (apiError?.errors || []).map((item: { reason?: string }) => item.reason || '').join(' ');
     const details = `${apiError?.status || ''} ${apiError?.message || ''} ${reasons}`.toLowerCase();
+    if (details.includes('quota') || details.includes('rate limit')) {
+      return 'Google agotó temporalmente la cuota de Gmail. Espera unos minutos y sincroniza de nuevo; Triade ahora evita volver a descargar mensajes ya guardados.';
+    }
     if (details.includes('accessnotconfigured') || details.includes('service_disabled') || details.includes('has not been used')) {
       return 'La Gmail API está desactivada en el proyecto de Google Cloud del Client ID. Habilítala y vuelve a sincronizar.';
     }
@@ -1068,6 +1071,9 @@ async function syncAccountInbox(accountEmailRaw: string, forcedProvider?: EmailP
 
   let liveMails: Mail[] = [];
   let liveMailCount = 0;
+  const cachedGmailIds = new Set(
+    mails.filter((mail) => mail.account.toLowerCase() === accountEmail).map((mail) => mail.id),
+  );
 
   if (effectiveToken) {
     try {
@@ -1092,7 +1098,7 @@ async function syncAccountInbox(accountEmailRaw: string, forcedProvider?: EmailP
           }
           mails.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
           renderMails();
-        });
+        }, cachedGmailIds);
       } else if (provider === 'outlook') {
         try {
           liveMails = await fetchRealOutlookMails(effectiveToken, accountEmail);
@@ -1121,7 +1127,7 @@ async function syncAccountInbox(accountEmailRaw: string, forcedProvider?: EmailP
         if (refreshedToken) {
           effectiveToken = refreshedToken;
           try {
-            liveMails = await fetchRealGmailMails(refreshedToken, accountEmail);
+            liveMails = await fetchRealGmailMails(refreshedToken, accountEmail, undefined, cachedGmailIds);
           } catch (retryError) {
             console.warn('Gmail retry after token refresh failed:', retryError);
           }
